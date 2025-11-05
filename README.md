@@ -1,10 +1,10 @@
 <h1 align="center">
   <br>
-   Sctp Compliance & Performance
+   SCTP Compliance & Performance
 
   <br>
 </h1>
-<h4 align="center">SCTP test & performance tool</h4>
+<h4 align="center">SCTP Test & Performance Tool</h4>
 <p align="center">
   <a href="https://pion.ly"><img src="https://img.shields.io/badge/pion-template-gray.svg?longCache=true&colorB=brightgreen" alt="Pion template"></a>
   <a href="https://discord.gg/PngbdqpFbt"><img src="https://img.shields.io/badge/join-us%20on%20discord-gray.svg?longCache=true&logo=discord&colorB=brightblue" alt="join us on Discord"></a> <a href="https://bsky.app/profile/pion.ly"><img src="https://img.shields.io/badge/follow-us%20on%20bluesky-gray.svg?longCache=true&logo=bluesky&colorB=brightblue" alt="Follow us on Bluesky"></a>  <br>
@@ -17,30 +17,18 @@
 <h6 align="center">Any connection between this project name and the SCP Foundation is purely coincidental… or not. 👀</h6>
 <br>
 
-This repo is a template for starting new Pion-related Git repositories.
+This project is a tool that tests Pion's SCTP implementation, with the following examples:
+- *Any* Pion SCTP version can be tested
+- Simulate various networking conditions
+  - Dynamic RTT
+  - UDP Packet Duplication
+  - Packet Loss
+  - Un/ordered packets
+- And more...
 
-### Steps for creating a new repo
+### Building and Testing
 
-1. Search and replace any occurrence of `template` in this repo.
-2. Add the repo to the [pion/.goassets sync workflow](https://github.com/pion/.goassets/blob/master/.github/workflows/assets-sync.yml#L15)
-3. Update README
-4. Update the repository details:
-    - Tags: at least "go", "golang", "pion", ...
-    - Description: _same as in README_
-    - URL: https://pion.ly/
-    - Disable features "Environments", "Packages"
-5. Please make sure the repo has consistent GitHub settings with the other Pion repos:
-    - Disable features "Wiki", "Projects", "Discussions", "Sponsorships"
-    - Enable feature "Preserve this repository"
-    - Only allow rebase merging. Disable squash and merge commits.
-    - Enable option "Always suggest updating pull request branches"
-    - Enable option "Automatically delete head branches"
-    - Make sure the [master branch is protected](https://github.com/pion/template/settings/branch_protection_rules):
-        - Enable "Require a pull request before merging"
-            - Enable "Require approvals"
-            - Set "Require number of approvals before merging" to 1
-        - Enable "Require status checks to pass before merging"
-        - Enable "Require linear history"
+🚧 Under construction, come back soon! 🚧
 
 ### Roadmap
 The library is used as a part of our WebRTC implementation. Please refer to that [roadmap](https://github.com/pion/webrtc/issues/9) to track our major milestones.
