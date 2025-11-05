@@ -1,9 +1,10 @@
 <h1 align="center">
   <br>
-  Pion Template
+   Sctp Compliance & Performance
+
   <br>
 </h1>
-<h4 align="center">Template for new Pion repositoies</h4>
+<h4 align="center">SCTP test & performance tool</h4>
 <p align="center">
   <a href="https://pion.ly"><img src="https://img.shields.io/badge/pion-template-gray.svg?longCache=true&colorB=brightgreen" alt="Pion template"></a>
   <a href="https://discord.gg/PngbdqpFbt"><img src="https://img.shields.io/badge/join-us%20on%20discord-gray.svg?longCache=true&logo=discord&colorB=brightblue" alt="join us on Discord"></a> <a href="https://bsky.app/profile/pion.ly"><img src="https://img.shields.io/badge/follow-us%20on%20bluesky-gray.svg?longCache=true&logo=bluesky&colorB=brightblue" alt="Follow us on Bluesky"></a>  <br>
@@ -13,6 +14,7 @@
   <a href="https://goreportcard.com/report/github.com/pion/template"><img src="https://goreportcard.com/badge/github.com/pion/template" alt="Go Report Card"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
+<h6 align="center">Any connection between this project name and the SCP Foundation is purely coincidental… or not. 👀</h6>
 <br>
 
 This repo is a template for starting new Pion-related Git repositories.
@@ -56,3 +58,4 @@ Check out the [contributing wiki](https://github.com/pion/webrtc/wiki/Contributi
 
 ### License
 MIT License - see [LICENSE](LICENSE) for full text
+
