@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 package testcmd
 
 import (
@@ -83,7 +86,7 @@ func runMaxBurstCase(ctx context.Context, pairs []pair, baseSeed int64, repeat i
 			return nil, ctx.Err()
 		default:
 		}
-		for iter := 0; iter < repeat; iter++ {
+		for iter := range repeat {
 			pairSeed := derivePairSeed(resolvedSeed, p, idx*repeat+iter)
 			forward := computeBurst(pairSeed, p.Left.Commit, p.Right.Commit)
 			reverse := computeBurst(pairSeed, p.Right.Commit, p.Left.Commit)

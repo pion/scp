@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-License-Identifier: MIT
+
 // Package generate implements the generator CLI that builds multi-version SCTP wrappers and harnesses.
 package generate
 
