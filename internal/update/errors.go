@@ -10,4 +10,3 @@ var (
 	errMissingLockPath     = errors.New("update: lock path is required")
 	errNotImplemented      = errors.New("update: implementation pending")
 )
-

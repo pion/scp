@@ -11,6 +11,33 @@ import (
 )
 
 func Run(ctx context.Context, opts Options) error {
+	if err := validateOptions(opts); err != nil {
+		return err
+	}
+
+	lock, err := loadAndValidateLock(opts.LockPath)
+	if err != nil {
+		return err
+	}
+
+	pairs, caseNames, err := prepareTestData(opts, lock)
+	if err != nil {
+		return err
+	}
+
+	results, err := runCases(ctx, caseNames, pairs, opts.Seed, opts.Repeat)
+	if err != nil {
+		return err
+	}
+
+	if err := reportResults(results, opts.JUnitPath); err != nil {
+		return err
+	}
+
+	return checkFailures(results)
+}
+
+func validateOptions(opts Options) error {
 	if opts.LockPath == "" {
 		return errMissingLockPath
 	}
@@ -18,40 +45,52 @@ func Run(ctx context.Context, opts Options) error {
 		return errInvalidRepeat
 	}
 
-	lock, err := scp.ReadLock(opts.LockPath)
+	return nil
+}
+
+func loadAndValidateLock(lockPath string) (*scp.Lockfile, error) {
+	lock, err := scp.ReadLock(lockPath)
 	if err != nil {
-		return fmt.Errorf("test: read lock: %w", err)
+		return nil, fmt.Errorf("test: read lock: %w", err)
 	}
 	if lock == nil || len(lock.Entries) == 0 {
-		return errEmptyLock
+		return nil, errEmptyLock
 	}
 
+	return lock, nil
+}
+
+func prepareTestData(opts Options, lock *scp.Lockfile) ([]pair, []string, error) {
 	include := buildNameSet(opts.IncludeNames)
 	exclude := buildNameSet(opts.ExcludeNames)
 	entries, err := selectEntries(lock.Entries, include, exclude)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	pairs, err := buildPairs(entries, opts.PairMode, opts.ExplicitPairs)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	caseNames := scp.SplitAndTrim(opts.Cases)
-	results, err := runCases(ctx, caseNames, pairs, opts.Seed, opts.Repeat)
-	if err != nil {
-		return err
-	}
 
+	return pairs, caseNames, nil
+}
+
+func reportResults(results []scenarioResult, junitPath string) error {
 	printResults(results)
 
-	if opts.JUnitPath != "" {
-		if err := writeJUnitReport(opts.JUnitPath, results); err != nil {
+	if junitPath != "" {
+		if err := writeJUnitReport(junitPath, results); err != nil {
 			return err
 		}
 	}
 
+	return nil
+}
+
+func checkFailures(results []scenarioResult) error {
 	if failures := countFailures(results); failures > 0 {
 		return fmt.Errorf("%w: %d failing cases", errScenarioFailed, failures)
 	}
@@ -62,6 +101,7 @@ func Run(ctx context.Context, opts Options) error {
 func printResults(results []scenarioResult) {
 	if len(results) == 0 {
 		fmt.Println("test: no cases executed")
+
 		return
 	}
 

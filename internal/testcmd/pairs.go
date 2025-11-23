@@ -79,6 +79,7 @@ func ensureIncluded(entries []scp.LockEntry, include map[string]struct{}) error 
 
 	if len(missing) > 0 {
 		sort.Strings(missing)
+
 		return fmt.Errorf("%w: %s", errRequestedEntryMissing, strings.Join(missing, ", "))
 	}
 
@@ -86,11 +87,8 @@ func ensureIncluded(entries []scp.LockEntry, include map[string]struct{}) error 
 }
 
 func buildPairs(entries []scp.LockEntry, mode string, explicit []string) ([]pair, error) {
-	if len(entries) == 0 {
-		return nil, errEmptyLock
-	}
-	if len(entries) < 2 && mode != "self" && mode != "explicit" {
-		return nil, errInsufficientEntries
+	if err := validatePairs(entries, mode); err != nil {
+		return nil, err
 	}
 
 	switch mode {
@@ -107,6 +105,17 @@ func buildPairs(entries []scp.LockEntry, mode string, explicit []string) ([]pair
 	default:
 		return nil, fmt.Errorf("%w: %s", errUnknownPairMode, mode)
 	}
+}
+
+func validatePairs(pairs []scp.LockEntry, mode string) error {
+	if len(pairs) == 0 {
+		return errEmptyLock
+	}
+	if len(pairs) < 2 && mode != "self" && mode != "explicit" {
+		return errInsufficientEntries
+	}
+
+	return nil
 }
 
 func adjacentPairs(entries []scp.LockEntry) []pair {
