@@ -69,7 +69,7 @@ func writeJUnitReport(path string, results []scenarioResult) error {
 	}
 	data = append([]byte(xml.Header), data...)
 
-	return os.WriteFile(path, data, 0o640)
+	return os.WriteFile(filepath.Clean(path), data, 0o600)
 }
 
 func ensureJUnitDir(path string) error {

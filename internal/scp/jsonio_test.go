@@ -6,6 +6,7 @@ package scp
 import (
 	"encoding/json"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -103,7 +104,7 @@ func TestCopyJSON(t *testing.T) {
 	data := `{"hello":"world"}`
 	require.NoError(t, CopyJSON(dst, strings.NewReader(data)))
 
-	contentFile, err := openReadOnlyFile(dst)
+	contentFile, err := os.Open(dst)
 	require.NoError(t, err)
 	defer func() {
 		_ = contentFile.Close()

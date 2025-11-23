@@ -37,7 +37,7 @@ func TestRunMaxBurstWritesJUnit(t *testing.T) {
 	}
 
 	require.NoError(t, Run(context.Background(), opts))
-	data, err := os.ReadFile(junitPath)
+	data, err := os.ReadFile(filepath.Clean(junitPath))
 	require.NoError(t, err)
 	require.Contains(t, string(data), "testsuite")
 }

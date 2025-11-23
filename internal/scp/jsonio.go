@@ -11,8 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 var (
@@ -26,7 +24,7 @@ func ReadManifest(path string) (*Manifest, error) {
 		return nil, err
 	}
 
-	f, err := openReadOnlyFile(safePath)
+	f, err := os.Open(safePath)
 	if err != nil {
 		return nil, fmt.Errorf("read manifest: %w", err)
 	}
@@ -61,7 +59,7 @@ func ReadLock(path string) (*Lockfile, error) {
 		return nil, err
 	}
 
-	f, err := openReadOnlyFile(safePath)
+	f, err := os.Open(safePath)
 	if err != nil {
 		return nil, fmt.Errorf("read lock: %w", err)
 	}
@@ -177,20 +175,6 @@ func cleanStatePath(path string) (string, error) {
 	return cleaned, nil
 }
 
-func openReadOnlyFile(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	return os.NewFile(uintptr(fd), path), nil
-}
-
 func openWritableFile(path string, perm os.FileMode) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC, uint32(perm))
-	if err != nil {
-		return nil, err
-	}
-
-	return os.NewFile(uintptr(fd), path), nil
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 }
