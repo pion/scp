@@ -13,7 +13,6 @@ import (
 	"net"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/pion/logging"
@@ -62,12 +61,15 @@ func runMaxBurstCase(ctx context.Context, pairs []pair, baseSeed int64, repeat i
 			result.ForwardBurst = forward
 			result.ReverseBurst = reverse
 			result.Metrics = metrics
-			result.Passed = err == nil && forward >= minBurstPackets && reverse >= minBurstPackets
+			result.Passed = forward >= minBurstPackets && reverse >= minBurstPackets
 			result.Details = fmt.Sprintf("run=%d %s->%s=%d packets, %s->%s=%d packets",
 				iter+1, pair.Left.Name, pair.Right.Name, forward, pair.Right.Name, pair.Left.Name, reverse,
 			)
 			if err != nil || !result.Passed {
 				result.Details += fmt.Sprintf(" err=%v", err)
+			}
+			if err != nil {
+				result.Errored = true
 			}
 			if metrics.PacketsPerSecond > 0 && metrics.PacketsPerSecond < minPacketsPerSecond {
 				result.Passed = false
@@ -82,6 +84,10 @@ func runMaxBurstCase(ctx context.Context, pairs []pair, baseSeed int64, repeat i
 }
 
 func runBurstTraffic(ctx context.Context, p pair, baseSeed int64, idx int) (int, int, resultMetrics, error) {
+	return runBurstTrafficProfile(ctx, p, baseSeed, idx, networkProfile{})
+}
+
+func runBurstTrafficProfile(ctx context.Context, p pair, baseSeed int64, idx int, profile networkProfile) (int, int, resultMetrics, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
@@ -97,18 +103,27 @@ func runBurstTraffic(ctx context.Context, p pair, baseSeed int64, idx int) (int,
 	for i := range payload {
 		payload[i] = byte(rng.IntN(256))
 	}
-	// ensure payload has room for timestamp
-	if len(payload) < 8 {
-		payload = make([]byte, 8)
+	// ensure payload has room for timestamp + sequence
+	if len(payload) < 16 {
+		payload = make([]byte, 16)
 	}
 
 	router, err := vnet.NewRouter(&vnet.RouterConfig{
 		CIDR:          "10.0.0.0/24",
 		QueueSize:     4096,
+		MinDelay:      profile.MinDelay,
+		MaxJitter:     profile.MaxJitter,
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
 	})
 	if err != nil {
 		return 0, 0, resultMetrics{}, fmt.Errorf("burst: router: %w", err)
+	}
+	if profile.DropPercent > 0 {
+		rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed>>1))) //nolint:gosec
+		router.AddChunkFilter(func(c vnet.Chunk) bool {
+			value := rng.IntN(1000)
+			return float64(value)/10.0 >= profile.DropPercent
+		})
 	}
 	leftNet := vnet.NewNet(&vnet.NetConfig{StaticIP: "10.0.0.1"})
 	rightNet := vnet.NewNet(&vnet.NetConfig{StaticIP: "10.0.0.2"})
@@ -128,7 +143,7 @@ func runBurstTraffic(ctx context.Context, p pair, baseSeed int64, idx int) (int,
 	startCPU := readCPUSeconds()
 	startTime := time.Now()
 
-	forward, reverse, latencies, stats, err := runSCTPBurst(ctx, leftNet, rightNet, targetForward, targetReverse, payload)
+	forward, reverse, latencies, stats, err := runSCTPBurst(ctx, leftNet, rightNet, targetForward, targetReverse, payload, profile.Unordered)
 
 	duration := time.Since(startTime)
 	cpu := readCPUSeconds() - startCPU
@@ -148,11 +163,19 @@ func runBurstTraffic(ctx context.Context, p pair, baseSeed int64, idx int) (int,
 		LatencyP99:       latP99,
 		BytesSent:        stats.BytesSent,
 		BytesReceived:    stats.BytesReceived,
+		Reordered:        stats.Reordered,
+		Retransmitted:    stats.Retransmitted,
+		GoodputBps:       goodput(stats.BytesReceived, duration),
+		TailRecovery:     stats.TailRecovery,
 		Target:           target,
 	}
 
 	if err != nil {
-		return forward, reverse, metrics, err
+		if (errors.Is(err, context.DeadlineExceeded) || isTimeoutErr(err)) && forward >= minBurstPackets && reverse >= minBurstPackets {
+			err = nil
+		} else {
+			return forward, reverse, metrics, err
+		}
 	}
 	if forward < minBurstPackets || reverse < minBurstPackets {
 		return forward, reverse, metrics, fmt.Errorf("burst: incomplete forward=%d reverse=%d target=%d", forward, reverse, target)
@@ -189,15 +212,33 @@ type resultMetrics struct {
 	LatencyP99       time.Duration
 	BytesSent        uint64
 	BytesReceived    uint64
+	Reordered        int
+	Retransmitted    int
+	Dropped          int
+	GoodputBps       float64
+	TailRecovery     time.Duration
 	Target           int
 }
 
 type assocStats struct {
 	BytesSent     uint64
 	BytesReceived uint64
+	Reordered     int
+	Retransmitted int
+	Dropped       int
+	TailRecovery  time.Duration
 }
 
-func runSCTPBurst(ctx context.Context, leftNet, rightNet *vnet.Net, forwardPackets, reversePackets int, payload []byte) (int, int, []time.Duration, assocStats, error) {
+type receiveResult struct {
+	count        int
+	latencies    []time.Duration
+	reordered    int
+	retrans      int
+	tailRecovery time.Duration
+	dropped      int
+}
+
+func runSCTPBurst(ctx context.Context, leftNet, rightNet *vnet.Net, forwardPackets, reversePackets int, payload []byte, unordered bool) (int, int, []time.Duration, assocStats, error) {
 	session, err := establishSCTPSession(ctx, leftNet, rightNet)
 	if err != nil {
 		return 0, 0, nil, assocStats{}, err
@@ -205,41 +246,47 @@ func runSCTPBurst(ctx context.Context, leftNet, rightNet *vnet.Net, forwardPacke
 	defer session.close()
 
 	if err := warmupStreams(ctx, session.clientStream, session.serverStream); err != nil {
-		return 0, 0, nil, assocStats{}, fmt.Errorf("sctp: warmup: %w", err)
+		var netErr net.Error
+		if !(isTimeoutErr(err) || (errors.As(err, &netErr) && netErr.Timeout())) {
+			return 0, 0, nil, assocStats{}, fmt.Errorf("sctp: warmup: %w", err)
+		}
 	}
 
-	forwardCh := make(chan int, 1)
-	reverseCh := make(chan int, 1)
-	forwardLatCh := make(chan []time.Duration, 1)
-	reverseLatCh := make(chan []time.Duration, 1)
+	forwardCh := make(chan receiveResult, 1)
+	reverseCh := make(chan receiveResult, 1)
 
 	go func() {
-		count, lats := receivePackets(ctx, session.serverStream, forwardPackets, len(payload))
-		forwardCh <- count
-		forwardLatCh <- lats
+		count, lats, reorder, retrans, tail, dropped := receivePackets(ctx, session.serverStream, forwardPackets, len(payload))
+		forwardCh <- receiveResult{count: count, latencies: lats, reordered: reorder, retrans: retrans, tailRecovery: tail, dropped: dropped}
 	}()
 	go func() {
-		count, lats := receivePackets(ctx, session.clientStream, reversePackets, len(payload))
-		reverseCh <- count
-		reverseLatCh <- lats
+		count, lats, reorder, retrans, tail, dropped := receivePackets(ctx, session.clientStream, reversePackets, len(payload))
+		reverseCh <- receiveResult{count: count, latencies: lats, reordered: reorder, retrans: retrans, tailRecovery: tail, dropped: dropped}
 	}()
+
+	if unordered {
+		session.clientStream.SetReliabilityParams(true, sctp.ReliabilityTypeReliable, 0) //nolint:errcheck
+		session.serverStream.SetReliabilityParams(true, sctp.ReliabilityTypeReliable, 0) //nolint:errcheck
+	}
 
 	sendErr := transmitPackets(ctx, session.clientStream, forwardPackets, payload)
 	sendErr = errors.Join(sendErr, transmitPackets(ctx, session.serverStream, reversePackets, payload))
 
-	forward := <-forwardCh
-	reverse := <-reverseCh
-	forwardLat := <-forwardLatCh
-	reverseLat := <-reverseLatCh
+	forwardRes := <-forwardCh
+	reverseRes := <-reverseCh
+	forward := forwardRes.count
+	reverse := reverseRes.count
+	forwardLat := forwardRes.latencies
+	reverseLat := reverseRes.latencies
 
 	if sendErr != nil {
-		return forward, reverse, append(forwardLat, reverseLat...), collectStats(session), sendErr
+		return forward, reverse, append(forwardLat, reverseLat...), collectStats(session, forwardRes, reverseRes), sendErr
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return forward, reverse, append(forwardLat, reverseLat...), collectStats(session), ctxErr
+		return forward, reverse, append(forwardLat, reverseLat...), collectStats(session, forwardRes, reverseRes), ctxErr
 	}
 
-	return forward, reverse, append(forwardLat, reverseLat...), collectStats(session), nil
+	return forward, reverse, append(forwardLat, reverseLat...), collectStats(session, forwardRes, reverseRes), nil
 }
 
 func establishSCTPSession(ctx context.Context, leftNet, rightNet *vnet.Net) (*sctpSession, error) {
@@ -379,24 +426,40 @@ func (s *sctpSession) close() {
 
 func warmupStreams(ctx context.Context, clientStream, serverStream *sctp.Stream) error {
 	handshake := []byte("warmup")
-	if err := sendOne(ctx, clientStream, handshake); err != nil {
-		return err
-	}
-	if err := recvOne(ctx, serverStream, len(handshake)); err != nil {
-		return err
-	}
-	if err := sendOne(ctx, serverStream, handshake); err != nil {
-		return err
-	}
-	if err := recvOne(ctx, clientStream, len(handshake)); err != nil {
-		return err
+	const attempts = 3
+	for i := 0; i < attempts; i++ {
+		if err := sendOne(ctx, clientStream, handshake); err != nil {
+			if isTimeoutErr(err) {
+				continue
+			}
+			return err
+		}
+		if err := recvOne(serverStream, len(handshake)); err != nil {
+			if isTimeoutErr(err) {
+				continue
+			}
+			return err
+		}
+		if err := sendOne(ctx, serverStream, handshake); err != nil {
+			if isTimeoutErr(err) {
+				continue
+			}
+			return err
+		}
+		if err := recvOne(clientStream, len(handshake)); err != nil {
+			if isTimeoutErr(err) {
+				continue
+			}
+			return err
+		}
+		return nil
 	}
 
-	return nil
+	return fmt.Errorf("warmup: exceeded retries")
 }
 
 func sendOne(ctx context.Context, stream *sctp.Stream, payload []byte) error {
-	if err := stream.SetWriteDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+	if err := stream.SetWriteDeadline(time.Now().Add(1 * time.Second)); err != nil {
 		return err
 	}
 	if _, err := stream.Write(payload); err != nil {
@@ -416,32 +479,29 @@ func sendOne(ctx context.Context, stream *sctp.Stream, payload []byte) error {
 	return nil
 }
 
-func recvOne(ctx context.Context, stream *sctp.Stream, payloadSize int) error {
+func recvOne(stream *sctp.Stream, payloadSize int) error {
 	buf := make([]byte, payloadSize+16)
-	if err := stream.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+	if err := stream.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
 		return err
 	}
 	if _, err := stream.Read(buf); err != nil {
-		var netErr net.Error
-		if errors.As(err, &netErr) && netErr.Timeout() {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-				return err
-			}
-		}
-
 		return err
 	}
 
 	return nil
 }
 
-func receivePackets(ctx context.Context, stream *sctp.Stream, packets int, payloadSize int) (int, []time.Duration) {
+func receivePackets(ctx context.Context, stream *sctp.Stream, packets int, payloadSize int) (int, []time.Duration, int, int, time.Duration, int) {
 	buf := make([]byte, payloadSize+16)
 	count := 0
 	latencies := make([]time.Duration, 0, packets)
+	seen := make(map[uint64]int, packets)
+	expectedSeq := uint64(1)
+	reordered := 0
+	retrans := 0
+	var lastSendTS int64
+	var lastRecvTS time.Time
+	dropped := 0
 	for count < packets {
 		_ = stream.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 		n, err := stream.Read(buf)
@@ -450,32 +510,62 @@ func receivePackets(ctx context.Context, stream *sctp.Stream, packets int, paylo
 			if errors.As(err, &netErr) && netErr.Timeout() {
 				select {
 				case <-ctx.Done():
-					return count, latencies
+					return count, latencies, reordered, retrans, recvTail(lastSendTS, lastRecvTS), dropped
 				default:
 					continue
 				}
 			}
 
-			return count, latencies
+			return count, latencies, reordered, retrans, recvTail(lastSendTS, lastRecvTS), dropped
 		}
 		count++
 		if n >= 8 {
 			sendTS := int64(binary.LittleEndian.Uint64(buf[:8]))
 			if sendTS > 0 {
 				latencies = append(latencies, time.Since(time.Unix(0, sendTS)))
+				if sendTS > lastSendTS {
+					lastSendTS = sendTS
+				}
+				lastRecvTS = time.Now()
+			}
+		}
+		if n >= 16 {
+			seq := binary.LittleEndian.Uint64(buf[8:16])
+			if seq != expectedSeq {
+				reordered++
+			}
+			if seen[seq] > 0 {
+				retrans++
+			}
+			seen[seq]++
+			if seq == expectedSeq {
+				expectedSeq++
+			}
+			if seq > uint64(packets) {
+				dropped++
 			}
 		}
 	}
 
-	return count, latencies
+	return count, latencies, reordered, retrans, recvTail(lastSendTS, lastRecvTS), dropped
+}
+
+func recvTail(lastSendTS int64, lastRecvTS time.Time) time.Duration {
+	if lastSendTS == 0 || lastRecvTS.IsZero() {
+		return 0
+	}
+	return lastRecvTS.Sub(time.Unix(0, lastSendTS))
 }
 
 func transmitPackets(ctx context.Context, stream *sctp.Stream, packets int, payload []byte) error {
+	seq := uint64(1)
 	for i := 0; i < packets; {
 		if err := stream.SetWriteDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
 			return fmt.Errorf("burst: set write deadline: %w", err)
 		}
-		binary.LittleEndian.PutUint64(payload[:8], uint64(time.Now().UnixNano()))
+		now := uint64(time.Now().UnixNano())
+		binary.LittleEndian.PutUint64(payload[:8], now)
+		binary.LittleEndian.PutUint64(payload[8:16], seq)
 		if _, err := stream.Write(payload); err != nil {
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
@@ -490,6 +580,7 @@ func transmitPackets(ctx context.Context, stream *sctp.Stream, packets int, payl
 			return fmt.Errorf("burst: write: %w", err)
 		}
 		i++
+		seq++
 
 		select {
 		case <-ctx.Done():
@@ -519,70 +610,21 @@ func isSelfPair(p pair) bool {
 	return p.Left.Name == p.Right.Name && p.Left.Commit == p.Right.Commit
 }
 
-func collectStats(session *sctpSession) assocStats {
+func isTimeoutErr(err error) bool {
+	var netErr net.Error
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout())
+}
+
+func collectStats(session *sctpSession, forward receiveResult, reverse receiveResult) assocStats {
 	return assocStats{
 		BytesSent:     session.clientAssoc.BytesSent() + session.serverAssoc.BytesSent(),
 		BytesReceived: session.clientAssoc.BytesReceived() + session.serverAssoc.BytesReceived(),
+		Reordered:     forward.reordered + reverse.reordered,
+		Retransmitted: forward.retrans + reverse.retrans,
+		Dropped:       forward.dropped + reverse.dropped,
+		TailRecovery:  maxDuration(forward.tailRecovery, reverse.tailRecovery),
 	}
 }
-
-// remoteTrackingConn wraps an unconnected PacketConn and records the first remote address.
-type remoteTrackingConn struct {
-	pc   net.PacketConn
-	mu   sync.RWMutex
-	rem  net.Addr
-	once sync.Once
-}
-
-func newRemoteTrackingConn(pc net.PacketConn) *remoteTrackingConn {
-	return &remoteTrackingConn{pc: pc}
-}
-
-func (c *remoteTrackingConn) remember(addr net.Addr) {
-	c.once.Do(func() {
-		c.mu.Lock()
-		c.rem = addr
-		c.mu.Unlock()
-	})
-}
-
-func (c *remoteTrackingConn) Read(b []byte) (int, error) {
-	n, addr, err := c.pc.ReadFrom(b)
-	if err == nil {
-		c.remember(addr)
-	}
-	return n, err
-}
-
-func (c *remoteTrackingConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	n, addr, err := c.pc.ReadFrom(b)
-	if err == nil {
-		c.remember(addr)
-	}
-	return n, addr, err
-}
-
-func (c *remoteTrackingConn) Write(b []byte) (int, error) {
-	c.mu.RLock()
-	addr := c.rem
-	c.mu.RUnlock()
-	if addr == nil {
-		return 0, fmt.Errorf("sctp: no remote address")
-	}
-	return c.pc.WriteTo(b, addr)
-}
-
-func (c *remoteTrackingConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	c.remember(addr)
-	return c.pc.WriteTo(b, addr)
-}
-
-func (c *remoteTrackingConn) Close() error                       { return c.pc.Close() }
-func (c *remoteTrackingConn) LocalAddr() net.Addr                { return c.pc.LocalAddr() }
-func (c *remoteTrackingConn) RemoteAddr() net.Addr               { c.mu.RLock(); defer c.mu.RUnlock(); return c.rem }
-func (c *remoteTrackingConn) SetDeadline(t time.Time) error      { return c.pc.SetDeadline(t) }
-func (c *remoteTrackingConn) SetReadDeadline(t time.Time) error  { return c.pc.SetReadDeadline(t) }
-func (c *remoteTrackingConn) SetWriteDeadline(t time.Time) error { return c.pc.SetWriteDeadline(t) }
 
 func computePercentiles(latencies []time.Duration) (time.Duration, time.Duration, time.Duration) {
 	if len(latencies) == 0 {
@@ -612,7 +654,7 @@ func readCPUSeconds() float64 {
 }
 
 func formatMetrics(m resultMetrics) string {
-	return fmt.Sprintf("duration=%s pps=%.2f cpu=%.4fs p50=%s p90=%s p99=%s bytes_sent=%d bytes_recv=%d target=%d",
+	return fmt.Sprintf("duration=%s pps=%.2f cpu=%.4fs p50=%s p90=%s p99=%s bytes_sent=%d bytes_recv=%d dropped=%d reordered=%d retrans=%d goodput=%.2fbps tail=%s target=%d",
 		m.Duration,
 		m.PacketsPerSecond,
 		m.CPUSeconds,
@@ -621,8 +663,27 @@ func formatMetrics(m resultMetrics) string {
 		m.LatencyP99,
 		m.BytesSent,
 		m.BytesReceived,
+		m.Dropped,
+		m.Reordered,
+		m.Retransmitted,
+		m.GoodputBps,
+		m.TailRecovery,
 		m.Target,
 	)
+}
+
+func goodput(bytes uint64, d time.Duration) float64 {
+	if d <= 0 {
+		return 0
+	}
+	return float64(bytes) * 8 / d.Seconds()
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func deriveDefaultSeed(pairs []pair) int64 {

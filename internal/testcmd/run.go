@@ -123,6 +123,9 @@ func printResults(results []scenarioResult) {
 		if (res.Metrics != resultMetrics{}) {
 			fmt.Printf("  metrics: %s\n", formatMetrics(res.Metrics))
 		}
+		if res.Errored {
+			fmt.Printf("  errored=1\n")
+		}
 	}
 }
 
