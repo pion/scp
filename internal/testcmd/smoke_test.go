@@ -23,7 +23,12 @@ func TestMaxBurstDeterministicWithoutSeed(t *testing.T) {
 	require.NoError(t, err)
 	second, err := runCases(context.Background(), []string{caseMaxBurst}, pairs, 0, 1)
 	require.NoError(t, err)
-	require.Equal(t, first, second)
+	require.Len(t, first, len(second))
+	for i := range first {
+		require.Equal(t, first[i].ForwardBurst, second[i].ForwardBurst)
+		require.Equal(t, first[i].ReverseBurst, second[i].ReverseBurst)
+		require.Equal(t, first[i].Iteration, second[i].Iteration)
+	}
 }
 
 func TestMaxBurstRepeat(t *testing.T) {
@@ -41,4 +46,31 @@ func TestMaxBurstRepeat(t *testing.T) {
 	require.Equal(t, 2, results[1].Iteration)
 	require.NotEqual(t, results[0].ForwardBurst, results[1].ForwardBurst)
 	require.NotEqual(t, results[0].ReverseBurst, results[1].ReverseBurst)
+}
+
+func TestMaxBurstSelfRepeatStable(t *testing.T) {
+	t.Parallel()
+
+	entry := scp.LockEntry{Name: "v1", Commit: "aaaaaaaa"}
+	pairs := []pair{
+		{Left: entry, Right: entry},
+		{Left: scp.LockEntry{Name: "v2", Commit: "aaaaaaaa"}, Right: scp.LockEntry{Name: "v2", Commit: "aaaaaaaa"}},
+	}
+
+	results, err := runCases(context.Background(), []string{caseMaxBurst}, pairs, 123, 2)
+	require.NoError(t, err)
+	require.Len(t, results, 4)
+
+	// self pairs should have symmetric forward/reverse per run
+	require.Equal(t, results[0].ForwardBurst, results[0].ReverseBurst)
+	require.Equal(t, results[1].ForwardBurst, results[1].ReverseBurst)
+	require.Equal(t, results[2].ForwardBurst, results[2].ReverseBurst)
+	require.Equal(t, results[3].ForwardBurst, results[3].ReverseBurst)
+
+	// iteration N should be identical across different self pairs
+	require.Equal(t, results[0].ForwardBurst, results[2].ForwardBurst)
+	require.Equal(t, results[1].ForwardBurst, results[3].ForwardBurst)
+
+	// iterations should differ from each other
+	require.NotEqual(t, results[0].ForwardBurst, results[1].ForwardBurst)
 }

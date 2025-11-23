@@ -21,6 +21,7 @@ type scenarioResult struct {
 	Passed       bool
 	Details      string
 	Iteration    int
+	Metrics      resultMetrics
 }
 
 func runCases(ctx context.Context, caseNames []string, pairs []pair, seed int64, repeat int) ([]scenarioResult, error) {

@@ -49,15 +49,16 @@ func writeJUnitReport(path string, results []scenarioResult) error {
 		if res.Iteration > 1 {
 			caseName = fmt.Sprintf("%s#%d", caseName, res.Iteration)
 		}
+		metricsLine := formatMetrics(res.Metrics)
 		jc := junitCase{
 			Classname: "scp." + res.CaseName,
 			Name:      caseName,
-			SystemOut: res.Details,
+			SystemOut: res.Details + "\n" + metricsLine,
 		}
 		if !res.Passed {
 			jc.Failure = &junitFailure{
 				Message: "max burst threshold not met",
-				Details: res.Details,
+				Details: res.Details + "\n" + metricsLine,
 			}
 		}
 		suite.TestCases = append(suite.TestCases, jc)

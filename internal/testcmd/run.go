@@ -117,6 +117,12 @@ func printResults(results []scenarioResult) {
 			res.ForwardBurst,
 			res.ReverseBurst,
 		)
+		if !res.Passed && res.Details != "" {
+			fmt.Printf("  details: %s\n", res.Details)
+		}
+		if (res.Metrics != resultMetrics{}) {
+			fmt.Printf("  metrics: %s\n", formatMetrics(res.Metrics))
+		}
 	}
 }
 
