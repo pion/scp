@@ -196,7 +196,7 @@ func selectEntries(lock *scp.Lockfile, only []string) ([]scp.LockEntry, error) {
 
 func writeRootModule(outDir string) error {
 	goModPath := filepath.Join(outDir, "go.mod")
-	content := "module " + rootModulePath + "\n\ngo 1.21\n\nrequire github.com/pion/transport v0.15.2\n"
+	content := "module " + rootModulePath + "\n\ngo 1.21\n\nrequire github.com/pion/transport v0.14.1\n"
 	data := []byte(content)
 
 	return os.WriteFile(goModPath, data, 0o600)

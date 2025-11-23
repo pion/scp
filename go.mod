@@ -6,6 +6,8 @@ toolchain go1.24.4
 
 require (
 	github.com/Masterminds/semver/v3 v3.4.0
+	github.com/pion/logging v0.2.2
+	github.com/pion/transport v0.14.1
 	github.com/spf13/cobra v1.10.1
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/mod v0.30.0

@@ -7,67 +7,22 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"math/rand/v2"
+	"net"
 	"strings"
 	"time"
+
+	"github.com/pion/logging"
+	"github.com/pion/transport/vnet"
 )
 
 const (
-	caseMaxBurst    = "max-burst"
-	minBurstPackets = 64
-	burstRange      = 512 - minBurstPackets + 1
+	minBurstPackets    = 64
+	burstRange         = 512 - minBurstPackets + 1
+	burstPayloadOctets = 1200
 )
-
-type scenarioResult struct {
-	CaseName     string
-	Pair         pair
-	ForwardBurst int
-	ReverseBurst int
-	Passed       bool
-	Details      string
-	Iteration    int
-}
-
-func runCases(ctx context.Context, caseNames []string, pairs []pair, seed int64, repeat int) ([]scenarioResult, error) {
-	names := normalizeCases(caseNames)
-	if len(names) == 0 {
-		names = []string{caseMaxBurst}
-	}
-
-	var results []scenarioResult
-	for _, name := range names {
-		switch name {
-		case caseMaxBurst:
-			res, err := runMaxBurstCase(ctx, pairs, seed, repeat)
-			if err != nil {
-				return nil, err
-			}
-			results = append(results, res...)
-		default:
-			return nil, fmt.Errorf("%w: %s", errUnknownCase, name)
-		}
-	}
-
-	return results, nil
-}
-
-func normalizeCases(names []string) []string {
-	seen := make(map[string]struct{}, len(names))
-	var ordered []string
-	for _, name := range names {
-		trimmed := strings.TrimSpace(name)
-		if trimmed == "" {
-			continue
-		}
-		if _, exists := seen[trimmed]; exists {
-			continue
-		}
-		seen[trimmed] = struct{}{}
-		ordered = append(ordered, trimmed)
-	}
-
-	return ordered
-}
 
 func runMaxBurstCase(ctx context.Context, pairs []pair, baseSeed int64, repeat int) ([]scenarioResult, error) {
 	if len(pairs) == 0 {
@@ -87,27 +42,145 @@ func runMaxBurstCase(ctx context.Context, pairs []pair, baseSeed int64, repeat i
 		default:
 		}
 		for iter := range repeat {
-			pairSeed := derivePairSeed(resolvedSeed, p, idx*repeat+iter)
-			forward := computeBurst(pairSeed, p.Left.Commit, p.Right.Commit)
-			reverse := computeBurst(pairSeed, p.Right.Commit, p.Left.Commit)
-			passed := forward >= minBurstPackets && reverse >= minBurstPackets
-			details := fmt.Sprintf("run=%d %s->%s=%d packets, %s->%s=%d packets",
+			result := scenarioResult{
+				CaseName:  caseMaxBurst,
+				Pair:      p,
+				Iteration: iter + 1,
+			}
+
+			forward, reverse, err := runBurstTraffic(ctx, p, resolvedSeed, idx*repeat+iter)
+			result.ForwardBurst = forward
+			result.ReverseBurst = reverse
+			result.Passed = err == nil && forward >= minBurstPackets && reverse >= minBurstPackets
+			result.Details = fmt.Sprintf("run=%d %s->%s=%d packets, %s->%s=%d packets",
 				iter+1, p.Left.Name, p.Right.Name, forward, p.Right.Name, p.Left.Name, reverse,
 			)
+			if err != nil {
+				result.Details += fmt.Sprintf(" err=%v", err)
+			}
 
-			results = append(results, scenarioResult{
-				CaseName:     caseMaxBurst,
-				Pair:         p,
-				ForwardBurst: forward,
-				ReverseBurst: reverse,
-				Passed:       passed,
-				Details:      details,
-				Iteration:    iter + 1,
-			})
+			results = append(results, result)
 		}
 	}
 
 	return results, nil
+}
+
+func runBurstTraffic(ctx context.Context, p pair, baseSeed int64, idx int) (int, int, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	seed := derivePairSeed(baseSeed, p, idx)
+	rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed>>1)))
+	targetForward := minBurstPackets + rng.IntN(burstRange)
+	targetReverse := minBurstPackets + rng.IntN(burstRange)
+	payload := make([]byte, burstPayloadOctets)
+	for i := range payload {
+		payload[i] = byte(rng.IntN(256))
+	}
+
+	router, err := vnet.NewRouter(&vnet.RouterConfig{
+		CIDR:          "10.0.0.0/24",
+		QueueSize:     4096,
+		LoggerFactory: logging.NewDefaultLoggerFactory(),
+	})
+	if err != nil {
+		return 0, 0, fmt.Errorf("burst: router: %w", err)
+	}
+	leftNet := vnet.NewNet(&vnet.NetConfig{StaticIP: "10.0.0.1"})
+	rightNet := vnet.NewNet(&vnet.NetConfig{StaticIP: "10.0.0.2"})
+	if err := router.AddNet(leftNet); err != nil {
+		return 0, 0, fmt.Errorf("burst: add left net: %w", err)
+	}
+	if err := router.AddNet(rightNet); err != nil {
+		return 0, 0, fmt.Errorf("burst: add right net: %w", err)
+	}
+	if err := router.Start(); err != nil {
+		return 0, 0, fmt.Errorf("burst: start router: %w", err)
+	}
+	defer func() {
+		_ = router.Stop()
+	}()
+
+	forward, forwardErr := sendBurst(ctx, leftNet, rightNet, "10.0.0.2:5000", targetForward, payload)
+	reverse, reverseErr := sendBurst(ctx, rightNet, leftNet, "10.0.0.1:5001", targetReverse, payload)
+
+	return forward, reverse, errors.Join(forwardErr, reverseErr)
+}
+
+func sendBurst(ctx context.Context, sender *vnet.Net, receiver *vnet.Net, listenAddr string, packets int, payload []byte) (int, error) {
+	recv, err := receiver.ListenPacket("udp4", listenAddr)
+	if err != nil {
+		return 0, fmt.Errorf("burst: listen %s: %w", listenAddr, err)
+	}
+	defer recv.Close()
+
+	sendConn, err := sender.Dial("udp4", listenAddr)
+	if err != nil {
+		return 0, fmt.Errorf("burst: dial %s: %w", listenAddr, err)
+	}
+	defer sendConn.Close()
+
+	delivered := make(chan int, 1)
+	go func() {
+		defer close(delivered)
+
+		buf := make([]byte, len(payload)+16)
+		count := 0
+		for count < packets {
+			_ = recv.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+			_, _, err := recv.ReadFrom(buf)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					select {
+					case <-ctx.Done():
+						delivered <- count
+						return
+					default:
+						continue
+					}
+				}
+				delivered <- count
+				return
+			}
+			count++
+		}
+
+		delivered <- count
+	}()
+
+	sendErr := transmitPackets(ctx, sendConn, packets, payload)
+	count := <-delivered
+
+	return count, sendErr
+}
+
+func transmitPackets(ctx context.Context, conn net.Conn, packets int, payload []byte) error {
+	for i := 0; i < packets; {
+		if err := conn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+			return fmt.Errorf("burst: set write deadline: %w", err)
+		}
+		if _, err := conn.Write(payload); err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					continue
+				}
+			}
+			return fmt.Errorf("burst: write: %w", err)
+		}
+		i++
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
+
+	return nil
 }
 
 func derivePairSeed(base int64, p pair, idx int) int64 {
@@ -115,14 +188,6 @@ func derivePairSeed(base int64, p pair, idx int) int64 {
 	sum := sha256.Sum256([]byte(payload))
 
 	return int64(binary.LittleEndian.Uint64(sum[:8]))
-}
-
-func computeBurst(seed int64, left, right string) int {
-	payload := fmt.Sprintf("%d:%s:%s", seed, left, right)
-	sum := sha256.Sum256([]byte(payload))
-	value := binary.LittleEndian.Uint32(sum[:4])
-
-	return minBurstPackets + int(value%uint32(burstRange))
 }
 
 func deriveDefaultSeed(pairs []pair) int64 {

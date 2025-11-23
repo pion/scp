@@ -11,6 +11,7 @@ var (
 	errEmptyLock             = errors.New("test: lock file has no entries")
 	errNoSelectableEntries   = errors.New("test: no entries selected after filtering")
 	errRequestedEntryMissing = errors.New("test: requested entry missing")
+	errNoCases               = errors.New("test: no cases specified")
 	errInsufficientEntries   = errors.New("test: at least two entries are required")
 	errUnknownPairMode       = errors.New("test: unknown pair mode")
 	errMissingExplicitPairs  = errors.New("test: explicit pairs required")

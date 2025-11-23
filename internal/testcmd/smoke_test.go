@@ -19,9 +19,9 @@ func TestMaxBurstDeterministicWithoutSeed(t *testing.T) {
 		Right: scp.LockEntry{Name: "v2", Commit: "bbbbbbbb"},
 	}}
 
-	first, err := runCases(context.Background(), nil, pairs, 0, 1)
+	first, err := runCases(context.Background(), []string{caseMaxBurst}, pairs, 0, 1)
 	require.NoError(t, err)
-	second, err := runCases(context.Background(), nil, pairs, 0, 1)
+	second, err := runCases(context.Background(), []string{caseMaxBurst}, pairs, 0, 1)
 	require.NoError(t, err)
 	require.Equal(t, first, second)
 }
@@ -34,7 +34,7 @@ func TestMaxBurstRepeat(t *testing.T) {
 		Right: scp.LockEntry{Name: "v2", Commit: "bbbbbbbb"},
 	}}
 
-	results, err := runCases(context.Background(), nil, pairs, 123, 2)
+	results, err := runCases(context.Background(), []string{caseMaxBurst}, pairs, 123, 2)
 	require.NoError(t, err)
 	require.Len(t, results, 2)
 	require.Equal(t, 1, results[0].Iteration)

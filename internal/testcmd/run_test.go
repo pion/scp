@@ -30,6 +30,7 @@ func TestRunMaxBurstWritesJUnit(t *testing.T) {
 	opts := Options{
 		LockPath:  lockPath,
 		PairMode:  "matrix",
+		Cases:     []string{caseMaxBurst},
 		Seed:      42,
 		JUnitPath: junitPath,
 		Repeat:    1,
