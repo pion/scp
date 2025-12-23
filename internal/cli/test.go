@@ -50,8 +50,13 @@ func newTestCmd() *cobra.Command {
 		"scenario IDs to run (comma-separated)",
 	)
 	cmd.Flags().StringVar(&opts.Timeout, "timeout", opts.Timeout, "overall timeout for each pair")
-	cmd.Flags().Int64Var(&opts.Seed, "seed", opts.Seed, "random seed (0=random)")
+	cmd.Flags().Int64Var(&opts.Seed, "seed", opts.Seed, "base seed (0=default)")
 	cmd.Flags().StringVar(&opts.JUnitPath, "out", opts.JUnitPath, "path to write JUnit XML results")
+	cmd.Flags().StringVar(&opts.OutDir, "out-dir", opts.OutDir, "directory to write run artifacts")
+	cmd.Flags().StringVar(&opts.Interleaving, "interleaving", opts.Interleaving, "override interleaving mode (auto|on|off)")
+	cmd.Flags().StringVar(&opts.PprofCPU, "pprof-cpu", opts.PprofCPU, "path to write CPU profile")
+	cmd.Flags().StringVar(&opts.PprofHeap, "pprof-heap", opts.PprofHeap, "path to write heap profile")
+	cmd.Flags().StringVar(&opts.PprofAllocs, "pprof-allocs", opts.PprofAllocs, "path to write allocs profile")
 	cmd.Flags().IntVar(&opts.Repeat, "repeat", opts.Repeat, "number of times to run each pair (>=1)")
 
 	return cmd

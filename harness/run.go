@@ -1,18 +1,29 @@
 // SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
-package testcmd
+package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/pion/scp/internal/scp"
 )
 
-func Run(ctx context.Context, opts Options) error {
+func Run(ctx context.Context, opts Options, registry map[string]AdapterFactory) (err error) {
 	if err := validateOptions(opts); err != nil {
 		return err
+	}
+
+	profiler, err := startProfiler(opts)
+	if err != nil {
+		return err
+	}
+	if profiler != nil {
+		defer func() {
+			err = errors.Join(err, profiler.Stop())
+		}()
 	}
 
 	lock, err := loadAndValidateLock(opts.LockPath)
@@ -24,13 +35,28 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
+	if err := attachAdapters(pairs, registry); err != nil {
+		return err
+	}
 
-	results, err := runCases(ctx, caseNames, pairs, opts.Seed, opts.Repeat)
+	timeout, err := parseTimeout(opts.Timeout)
+	if err != nil {
+		return err
+	}
+
+	resolvedCases := resolveCaseNames(caseNames)
+	seedUsed := resolveSeed(opts.Seed)
+
+	results, err := runCases(ctx, resolvedCases, pairs, seedUsed, opts.Repeat, timeout, opts.OutDir, opts.Interleaving)
 	if err != nil {
 		return err
 	}
 
 	if err := reportResults(results, opts.JUnitPath); err != nil {
+		return err
+	}
+
+	if err := writeArtifacts(opts, seedUsed, resolvedCases, pairs, results, timeout); err != nil {
 		return err
 	}
 
@@ -43,6 +69,9 @@ func validateOptions(opts Options) error {
 	}
 	if opts.Repeat <= 0 {
 		return errInvalidRepeat
+	}
+	if err := validateInterleavingOverride(opts.Interleaving); err != nil {
+		return err
 	}
 
 	return nil

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
-package testcmd
+package harness
 
 import (
 	"context"
@@ -12,11 +12,9 @@ import (
 	"math/rand/v2"
 	"net"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/pion/logging"
-	"github.com/pion/sctp"
 	"github.com/pion/transport/vnet"
 	"golang.org/x/sys/unix"
 )
@@ -28,78 +26,29 @@ const (
 	minPacketsPerSecond = 1.0
 )
 
-func runMaxBurstCase(ctx context.Context, pairs []pair, baseSeed int64, repeat int) ([]scenarioResult, error) {
-	if len(pairs) == 0 {
-		return nil, errInsufficientEntries
-	}
-
-	resolvedSeed := baseSeed
-	if resolvedSeed == 0 {
-		resolvedSeed = deriveDefaultSeed(pairs)
-	}
-
-	results := make([]scenarioResult, 0, len(pairs)*repeat)
-	for idx, pair := range pairs {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-		for iter := range repeat {
-			result := scenarioResult{
-				CaseName:  caseMaxBurst,
-				Pair:      pair,
-				Iteration: iter + 1,
-			}
-
-			seq := idx*repeat + iter
-			if isSelfPair(pair) {
-				seq = iter
-			}
-
-			forward, reverse, metrics, err := runBurstTraffic(ctx, pair, resolvedSeed, seq)
-			result.ForwardBurst = forward
-			result.ReverseBurst = reverse
-			result.Metrics = metrics
-			result.Passed = forward >= minBurstPackets && reverse >= minBurstPackets
-			result.Details = fmt.Sprintf("run=%d %s->%s=%d packets, %s->%s=%d packets",
-				iter+1, pair.Left.Name, pair.Right.Name, forward, pair.Right.Name, pair.Left.Name, reverse,
-			)
-			if err != nil || !result.Passed {
-				result.Details += fmt.Sprintf(" err=%v", err)
-			}
-			if err != nil {
-				result.Errored = true
-			}
-			if metrics.PacketsPerSecond > 0 && metrics.PacketsPerSecond < minPacketsPerSecond {
-				result.Passed = false
-				result.Details += fmt.Sprintf(" rate=%.2fpps<threshold(%.2f)", metrics.PacketsPerSecond, minPacketsPerSecond)
-			}
-
-			results = append(results, result)
-		}
-	}
-
-	return results, nil
-}
-
-func runBurstTraffic(ctx context.Context, p pair, baseSeed int64, idx int) (int, int, resultMetrics, error) {
-	return runBurstTrafficProfile(ctx, p, baseSeed, idx, networkProfile{})
-}
-
-func runBurstTrafficProfile(ctx context.Context, p pair, baseSeed int64, idx int, profile networkProfile) (int, int, resultMetrics, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	seed := derivePairSeed(baseSeed, p, idx)
-	if isSelfPair(p) {
-		seed = deriveSelfSeed(baseSeed, idx)
-	}
+func runBurstTrafficProfile(
+	ctx context.Context,
+	p pair,
+	baseSeed int64,
+	idx int,
+	profile networkProfile,
+	logPath string,
+	policy casePolicy,
+	fault *faultSpec,
+	payloadSize int,
+	enableInterleaving bool,
+	maxMessageSize uint32,
+) (int, int, resultMetrics, error) {
+	seed := derivePairSeed(baseSeed, idx)
 	rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed>>1))) //nolint:gosec // not cryptographic purpose
 	target := minBurstPackets + rng.IntN(burstRange)
 	targetForward := target
 	targetReverse := target
-	payload := make([]byte, burstPayloadOctets)
+	payloadOctets := burstPayloadOctets
+	if payloadSize > 0 {
+		payloadOctets = payloadSize
+	}
+	payload := make([]byte, payloadOctets)
 	for i := range payload {
 		payload[i] = byte(rng.IntN(256))
 	}
@@ -118,6 +67,22 @@ func runBurstTrafficProfile(ctx context.Context, p pair, baseSeed int64, idx int
 	if err != nil {
 		return 0, 0, resultMetrics{}, fmt.Errorf("burst: router: %w", err)
 	}
+	logger, err := newPacketLogger(logPath)
+	if err != nil {
+		return 0, 0, resultMetrics{}, fmt.Errorf("burst: packet logger: %w", err)
+	}
+	if logger != nil {
+		defer func() {
+			_ = logger.Close()
+		}()
+	}
+	if fault != nil {
+		if faultInjector := newFaultInjector(*fault); faultInjector != nil {
+			router.AddChunkFilter(faultInjector.Filter)
+		}
+	}
+	validator := newWireValidator(logger)
+	router.AddChunkFilter(validator.Filter)
 	if profile.DropPercent > 0 {
 		rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed>>1))) //nolint:gosec
 		router.AddChunkFilter(func(c vnet.Chunk) bool {
@@ -143,7 +108,36 @@ func runBurstTrafficProfile(ctx context.Context, p pair, baseSeed int64, idx int
 	startCPU := readCPUSeconds()
 	startTime := time.Now()
 
-	forward, reverse, latencies, stats, err := runSCTPBurst(ctx, leftNet, rightNet, targetForward, targetReverse, payload, profile.Unordered)
+	leftAdapter, rightAdapter, err := instantiateAdapters(p)
+	if err != nil {
+		return 0, 0, resultMetrics{}, err
+	}
+	if enableInterleaving {
+		leftOK := supportsInterleaving(leftAdapter)
+		rightOK := supportsInterleaving(rightAdapter)
+		if !leftOK || !rightOK {
+			return 0, 0, resultMetrics{}, fmt.Errorf("%w: left=%s right=%s",
+				errInterleavingUnsupported,
+				supportLabel(leftAdapter, leftOK),
+				supportLabel(rightAdapter, rightOK),
+			)
+		}
+	}
+	forward, reverse, latencies, stats, err := runSCTPBurst(
+		ctx,
+		leftNet,
+		rightNet,
+		leftAdapter,
+		rightAdapter,
+		targetForward,
+		targetReverse,
+		payload,
+		profile.Unordered,
+		sessionOptions{
+			EnableInterleaving: enableInterleaving,
+			MaxMessageSize:     maxMessageSize,
+		},
+	)
 
 	duration := time.Since(startTime)
 	cpu := readCPUSeconds() - startCPU
@@ -154,6 +148,7 @@ func runBurstTrafficProfile(ctx context.Context, p pair, baseSeed int64, idx int
 	}
 
 	latP50, latP90, latP99 := computePercentiles(latencies)
+	wireSummary := validator.Summary()
 	metrics := resultMetrics{
 		Duration:         duration,
 		PacketsPerSecond: pps,
@@ -163,43 +158,49 @@ func runBurstTrafficProfile(ctx context.Context, p pair, baseSeed int64, idx int
 		LatencyP99:       latP99,
 		BytesSent:        stats.BytesSent,
 		BytesReceived:    stats.BytesReceived,
+		Dropped:          stats.Dropped,
 		Reordered:        stats.Reordered,
 		Retransmitted:    stats.Retransmitted,
+		WirePackets:      wireSummary.TotalPackets,
+		WireChecksumErrs: wireSummary.ChecksumErrors,
+		WireParseErrors:  wireSummary.ParseErrors,
+		WireShortPackets: wireSummary.ShortPackets,
+		WireLogErrors:    wireSummary.LogErrors,
 		GoodputBps:       goodput(stats.BytesReceived, duration),
 		TailRecovery:     stats.TailRecovery,
 		Target:           target,
 	}
 
 	if err != nil {
-		if (errors.Is(err, context.DeadlineExceeded) || isTimeoutErr(err)) && forward >= minBurstPackets && reverse >= minBurstPackets {
-			err = nil
-		} else {
-			return forward, reverse, metrics, err
+		if (errors.Is(err, context.DeadlineExceeded) || isTimeoutErr(err)) && policy.MinForward > 0 && policy.MinReverse > 0 {
+			if forward >= policy.MinForward && reverse >= policy.MinReverse {
+				err = nil
+			}
 		}
 	}
-	if forward < minBurstPackets || reverse < minBurstPackets {
-		return forward, reverse, metrics, fmt.Errorf("burst: incomplete forward=%d reverse=%d target=%d", forward, reverse, target)
+	if err != nil {
+		return forward, reverse, metrics, err
 	}
 
 	return forward, reverse, metrics, nil
 }
 
 type sctpSession struct {
-	clientAssoc  *sctp.Association
-	serverAssoc  *sctp.Association
-	clientStream *sctp.Stream
-	serverStream *sctp.Stream
+	clientAssoc  Association
+	serverAssoc  Association
+	clientStream Stream
+	serverStream Stream
 	clientConn   net.Conn
 	serverConn   net.Conn
 }
 
 type assocResult struct {
-	assoc *sctp.Association
+	assoc Association
 	err   error
 }
 
 type streamResult struct {
-	stream *sctp.Stream
+	stream Stream
 	err    error
 }
 
@@ -215,6 +216,11 @@ type resultMetrics struct {
 	Reordered        int
 	Retransmitted    int
 	Dropped          int
+	WirePackets      int
+	WireChecksumErrs int
+	WireParseErrors  int
+	WireShortPackets int
+	WireLogErrors    int
 	GoodputBps       float64
 	TailRecovery     time.Duration
 	Target           int
@@ -238,8 +244,16 @@ type receiveResult struct {
 	dropped      int
 }
 
-func runSCTPBurst(ctx context.Context, leftNet, rightNet *vnet.Net, forwardPackets, reversePackets int, payload []byte, unordered bool) (int, int, []time.Duration, assocStats, error) {
-	session, err := establishSCTPSession(ctx, leftNet, rightNet)
+func runSCTPBurst(
+	ctx context.Context,
+	leftNet, rightNet *vnet.Net,
+	leftAdapter, rightAdapter Adapter,
+	forwardPackets, reversePackets int,
+	payload []byte,
+	unordered bool,
+	opts sessionOptions,
+) (int, int, []time.Duration, assocStats, error) {
+	session, err := establishSCTPSession(ctx, leftNet, rightNet, leftAdapter, rightAdapter, opts)
 	if err != nil {
 		return 0, 0, nil, assocStats{}, err
 	}
@@ -256,17 +270,17 @@ func runSCTPBurst(ctx context.Context, leftNet, rightNet *vnet.Net, forwardPacke
 	reverseCh := make(chan receiveResult, 1)
 
 	go func() {
-		count, lats, reorder, retrans, tail, dropped := receivePackets(ctx, session.serverStream, forwardPackets, len(payload))
+		count, lats, reorder, retrans, tail, dropped := receivePackets(ctx, session.serverStream, forwardPackets, len(payload), nil, 0)
 		forwardCh <- receiveResult{count: count, latencies: lats, reordered: reorder, retrans: retrans, tailRecovery: tail, dropped: dropped}
 	}()
 	go func() {
-		count, lats, reorder, retrans, tail, dropped := receivePackets(ctx, session.clientStream, reversePackets, len(payload))
+		count, lats, reorder, retrans, tail, dropped := receivePackets(ctx, session.clientStream, reversePackets, len(payload), nil, 0)
 		reverseCh <- receiveResult{count: count, latencies: lats, reordered: reorder, retrans: retrans, tailRecovery: tail, dropped: dropped}
 	}()
 
 	if unordered {
-		session.clientStream.SetReliabilityParams(true, sctp.ReliabilityTypeReliable, 0) //nolint:errcheck
-		session.serverStream.SetReliabilityParams(true, sctp.ReliabilityTypeReliable, 0) //nolint:errcheck
+		session.clientStream.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
+		session.serverStream.SetReliabilityParams(true, ReliabilityTypeReliable, 0)
 	}
 
 	sendErr := transmitPackets(ctx, session.clientStream, forwardPackets, payload)
@@ -289,7 +303,11 @@ func runSCTPBurst(ctx context.Context, leftNet, rightNet *vnet.Net, forwardPacke
 	return forward, reverse, append(forwardLat, reverseLat...), collectStats(session, forwardRes, reverseRes), nil
 }
 
-func establishSCTPSession(ctx context.Context, leftNet, rightNet *vnet.Net) (*sctpSession, error) {
+func establishSCTPSession(ctx context.Context, leftNet, rightNet *vnet.Net, leftAdapter, rightAdapter Adapter, opts sessionOptions) (*sctpSession, error) {
+	if leftAdapter == nil || rightAdapter == nil {
+		return nil, errMissingAdapter
+	}
+
 	serverAddr := &net.UDPAddr{IP: net.ParseIP("10.0.0.2"), Port: 5000}
 	clientAddr := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 5001}
 
@@ -304,33 +322,32 @@ func establishSCTPSession(ctx context.Context, leftNet, rightNet *vnet.Net) (*sc
 		return nil, fmt.Errorf("sctp: client dial: %w", err)
 	}
 
-	serverConfig := sctp.Config{
-		NetConn:       serverConn,
-		LoggerFactory: logging.NewDefaultLoggerFactory(),
+	serverConfig := Config{
+		NetConn:            serverConn,
+		LoggerFactory:      logging.NewDefaultLoggerFactory(),
+		EnableInterleaving: opts.EnableInterleaving,
+		MaxMessageSize:     opts.MaxMessageSize,
 	}
-	clientConfig := sctp.Config{
-		NetConn:       clientConn,
-		LoggerFactory: logging.NewDefaultLoggerFactory(),
+	clientConfig := Config{
+		NetConn:            clientConn,
+		LoggerFactory:      logging.NewDefaultLoggerFactory(),
+		EnableInterleaving: opts.EnableInterleaving,
+		MaxMessageSize:     opts.MaxMessageSize,
 	}
 
-	serverAssocCh := make(chan *sctp.Association, 1)
-	serverErrCh := make(chan error, 1)
+	serverAssocCh := make(chan assocResult, 1)
 	go func() {
-		assoc, serveErr := sctp.Server(serverConfig)
-		if serveErr != nil {
-			serverErrCh <- serveErr
-			return
-		}
-		serverAssocCh <- assoc
+		assoc, serveErr := rightAdapter.Server(serverConfig)
+		serverAssocCh <- assocResult{assoc: assoc, err: serveErr}
 	}()
 
 	clientAssocCh := make(chan assocResult, 1)
 	go func() {
-		assoc, assocErr := sctp.Client(clientConfig)
+		assoc, assocErr := leftAdapter.Client(clientConfig)
 		clientAssocCh <- assocResult{assoc: assoc, err: assocErr}
 	}()
 
-	var clientAssoc *sctp.Association
+	var clientAssoc Association
 	select {
 	case res := <-clientAssocCh:
 		if res.err != nil {
@@ -345,14 +362,16 @@ func establishSCTPSession(ctx context.Context, leftNet, rightNet *vnet.Net) (*sc
 		return nil, ctx.Err()
 	}
 
-	var serverAssoc *sctp.Association
+	var serverAssoc Association
 	select {
-	case serverErr := <-serverErrCh:
-		clientAssoc.Close()
-		serverConn.Close()
-		clientConn.Close()
-		return nil, fmt.Errorf("sctp: server: %w", serverErr)
-	case serverAssoc = <-serverAssocCh:
+	case res := <-serverAssocCh:
+		if res.err != nil {
+			clientAssoc.Close()
+			serverConn.Close()
+			clientConn.Close()
+			return nil, fmt.Errorf("sctp: server: %w", res.err)
+		}
+		serverAssoc = res.assoc
 	case <-ctx.Done():
 		clientAssoc.Close()
 		serverConn.Close()
@@ -362,7 +381,7 @@ func establishSCTPSession(ctx context.Context, leftNet, rightNet *vnet.Net) (*sc
 
 	clientStreamCh := make(chan streamResult, 1)
 	go func() {
-		stream, streamErr := clientAssoc.OpenStream(0, sctp.PayloadTypeWebRTCBinary)
+		stream, streamErr := clientAssoc.OpenStream(0, PayloadTypeWebRTCBinary)
 		clientStreamCh <- streamResult{stream: stream, err: streamErr}
 	}()
 	serverStreamCh := make(chan streamResult, 1)
@@ -371,8 +390,8 @@ func establishSCTPSession(ctx context.Context, leftNet, rightNet *vnet.Net) (*sc
 		serverStreamCh <- streamResult{stream: stream, err: streamErr}
 	}()
 
-	var clientStream *sctp.Stream
-	var serverStream *sctp.Stream
+	var clientStream Stream
+	var serverStream Stream
 	for clientStream == nil || serverStream == nil {
 		select {
 		case res := <-clientStreamCh:
@@ -424,7 +443,7 @@ func (s *sctpSession) close() {
 	_ = s.serverConn.Close()
 }
 
-func warmupStreams(ctx context.Context, clientStream, serverStream *sctp.Stream) error {
+func warmupStreams(ctx context.Context, clientStream, serverStream Stream) error {
 	handshake := []byte("warmup")
 	const attempts = 3
 	for i := 0; i < attempts; i++ {
@@ -458,7 +477,7 @@ func warmupStreams(ctx context.Context, clientStream, serverStream *sctp.Stream)
 	return fmt.Errorf("warmup: exceeded retries")
 }
 
-func sendOne(ctx context.Context, stream *sctp.Stream, payload []byte) error {
+func sendOne(ctx context.Context, stream Stream, payload []byte) error {
 	if err := stream.SetWriteDeadline(time.Now().Add(1 * time.Second)); err != nil {
 		return err
 	}
@@ -479,7 +498,7 @@ func sendOne(ctx context.Context, stream *sctp.Stream, payload []byte) error {
 	return nil
 }
 
-func recvOne(stream *sctp.Stream, payloadSize int) error {
+func recvOne(stream Stream, payloadSize int) error {
 	buf := make([]byte, payloadSize+16)
 	if err := stream.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
 		return err
@@ -491,7 +510,7 @@ func recvOne(stream *sctp.Stream, payloadSize int) error {
 	return nil
 }
 
-func receivePackets(ctx context.Context, stream *sctp.Stream, packets int, payloadSize int) (int, []time.Duration, int, int, time.Duration, int) {
+func receivePackets(ctx context.Context, stream Stream, packets int, payloadSize int, done <-chan struct{}, drainTimeout time.Duration) (int, []time.Duration, int, int, time.Duration, int) {
 	buf := make([]byte, payloadSize+16)
 	count := 0
 	latencies := make([]time.Duration, 0, packets)
@@ -501,8 +520,14 @@ func receivePackets(ctx context.Context, stream *sctp.Stream, packets int, paylo
 	retrans := 0
 	var lastSendTS int64
 	var lastRecvTS time.Time
+	var doneAt time.Time
 	dropped := 0
 	for count < packets {
+		select {
+		case <-ctx.Done():
+			return count, latencies, reordered, retrans, recvTail(lastSendTS, lastRecvTS), dropped
+		default:
+		}
 		_ = stream.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 		n, err := stream.Read(buf)
 		if err != nil {
@@ -512,8 +537,29 @@ func receivePackets(ctx context.Context, stream *sctp.Stream, packets int, paylo
 				case <-ctx.Done():
 					return count, latencies, reordered, retrans, recvTail(lastSendTS, lastRecvTS), dropped
 				default:
-					continue
 				}
+				if done != nil && drainTimeout > 0 {
+					select {
+					case <-done:
+						if doneAt.IsZero() {
+							doneAt = time.Now()
+							if lastRecvTS.IsZero() {
+								lastRecvTS = doneAt
+							}
+						}
+					default:
+					}
+					if !doneAt.IsZero() {
+						last := lastRecvTS
+						if last.IsZero() {
+							last = doneAt
+						}
+						if time.Since(last) >= drainTimeout {
+							return count, latencies, reordered, retrans, recvTail(lastSendTS, lastRecvTS), dropped
+						}
+					}
+				}
+				continue
 			}
 
 			return count, latencies, reordered, retrans, recvTail(lastSendTS, lastRecvTS), dropped
@@ -557,7 +603,7 @@ func recvTail(lastSendTS int64, lastRecvTS time.Time) time.Duration {
 	return lastRecvTS.Sub(time.Unix(0, lastSendTS))
 }
 
-func transmitPackets(ctx context.Context, stream *sctp.Stream, packets int, payload []byte) error {
+func transmitPackets(ctx context.Context, stream Stream, packets int, payload []byte) error {
 	seq := uint64(1)
 	for i := 0; i < packets; {
 		if err := stream.SetWriteDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
@@ -592,22 +638,30 @@ func transmitPackets(ctx context.Context, stream *sctp.Stream, packets int, payl
 	return nil
 }
 
-func derivePairSeed(base int64, p pair, idx int) int64 {
-	payload := fmt.Sprintf("%d:%s:%s:%s:%s:%d", base, p.Left.Name, p.Left.Commit, p.Right.Name, p.Right.Commit, idx)
+func derivePairSeed(base int64, idx int) int64 {
+	payload := fmt.Sprintf("%d:%d", base, idx)
 	sum := sha256.Sum256([]byte(payload))
 
 	return int64(binary.LittleEndian.Uint64(sum[:8])) //nolint:gosec // not cryptographic purpose
 }
 
-func deriveSelfSeed(base int64, idx int) int64 {
-	payload := fmt.Sprintf("%d:self:%d", base, idx)
-	sum := sha256.Sum256([]byte(payload))
+func instantiateAdapters(p pair) (Adapter, Adapter, error) {
+	if p.LeftAdapter == nil {
+		return nil, nil, fmt.Errorf("%w: %s", errMissingAdapter, p.Left.Name)
+	}
+	if p.RightAdapter == nil {
+		return nil, nil, fmt.Errorf("%w: %s", errMissingAdapter, p.Right.Name)
+	}
+	left := p.LeftAdapter()
+	if left == nil {
+		return nil, nil, fmt.Errorf("%w: %s", errMissingAdapter, p.Left.Name)
+	}
+	right := p.RightAdapter()
+	if right == nil {
+		return nil, nil, fmt.Errorf("%w: %s", errMissingAdapter, p.Right.Name)
+	}
 
-	return int64(binary.LittleEndian.Uint64(sum[:8])) //nolint:gosec // not cryptographic purpose
-}
-
-func isSelfPair(p pair) bool {
-	return p.Left.Name == p.Right.Name && p.Left.Commit == p.Right.Commit
+	return left, right, nil
 }
 
 func isTimeoutErr(err error) bool {
@@ -654,7 +708,7 @@ func readCPUSeconds() float64 {
 }
 
 func formatMetrics(m resultMetrics) string {
-	return fmt.Sprintf("duration=%s pps=%.2f cpu=%.4fs p50=%s p90=%s p99=%s bytes_sent=%d bytes_recv=%d dropped=%d reordered=%d retrans=%d goodput=%.2fbps tail=%s target=%d",
+	return fmt.Sprintf("duration=%s pps=%.2f cpu=%.4fs p50=%s p90=%s p99=%s bytes_sent=%d bytes_recv=%d dropped=%d reordered=%d retrans=%d wire_packets=%d wire_crc_errs=%d wire_parse_errs=%d wire_short=%d wire_log_errs=%d goodput=%.2fbps tail=%s target=%d",
 		m.Duration,
 		m.PacketsPerSecond,
 		m.CPUSeconds,
@@ -666,6 +720,11 @@ func formatMetrics(m resultMetrics) string {
 		m.Dropped,
 		m.Reordered,
 		m.Retransmitted,
+		m.WirePackets,
+		m.WireChecksumErrs,
+		m.WireParseErrors,
+		m.WireShortPackets,
+		m.WireLogErrors,
 		m.GoodputBps,
 		m.TailRecovery,
 		m.Target,
@@ -684,25 +743,4 @@ func maxDuration(a, b time.Duration) time.Duration {
 		return a
 	}
 	return b
-}
-
-func deriveDefaultSeed(pairs []pair) int64 {
-	var builder strings.Builder
-	for _, p := range pairs {
-		builder.WriteString(p.Left.Name)
-		builder.WriteByte(':')
-		builder.WriteString(p.Left.Commit)
-		builder.WriteByte('|')
-		builder.WriteString(p.Right.Name)
-		builder.WriteByte(':')
-		builder.WriteString(p.Right.Commit)
-		builder.WriteByte(';')
-	}
-	sum := sha256.Sum256([]byte(builder.String()))
-	seed := int64(binary.LittleEndian.Uint64(sum[:8])) //nolint:gosec // not cryptographic purpose
-	if seed == 0 {
-		seed = time.Now().UnixNano()
-	}
-
-	return seed
 }

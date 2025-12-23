@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
-package testcmd
+package harness
 
 import (
 	"fmt"
@@ -12,8 +12,10 @@ import (
 )
 
 type pair struct {
-	Left  scp.LockEntry
-	Right scp.LockEntry
+	Left         scp.LockEntry
+	Right        scp.LockEntry
+	LeftAdapter  AdapterFactory
+	RightAdapter AdapterFactory
 }
 
 func buildNameSet(values []string) map[string]struct{} {
@@ -105,6 +107,26 @@ func buildPairs(entries []scp.LockEntry, mode string, explicit []string) ([]pair
 	default:
 		return nil, fmt.Errorf("%w: %s", errUnknownPairMode, mode)
 	}
+}
+
+func attachAdapters(pairs []pair, registry map[string]AdapterFactory) error {
+	if len(registry) == 0 {
+		return errMissingAdapter
+	}
+	for i := range pairs {
+		leftFactory, ok := registry[pairs[i].Left.Name]
+		if !ok {
+			return fmt.Errorf("%w: %s", errMissingAdapter, pairs[i].Left.Name)
+		}
+		rightFactory, ok := registry[pairs[i].Right.Name]
+		if !ok {
+			return fmt.Errorf("%w: %s", errMissingAdapter, pairs[i].Right.Name)
+		}
+		pairs[i].LeftAdapter = leftFactory
+		pairs[i].RightAdapter = rightFactory
+	}
+
+	return nil
 }
 
 func validatePairs(pairs []scp.LockEntry, mode string) error {

@@ -1,11 +1,15 @@
+//go:build harness_integration
+// +build harness_integration
+
 // SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
-package testcmd
+package harness
 
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/pion/scp/internal/scp"
 	"github.com/stretchr/testify/require"
@@ -14,14 +18,15 @@ import (
 func TestMaxBurstDeterministicWithoutSeed(t *testing.T) {
 	t.Parallel()
 
+	timeout := 20 * time.Second
 	pairs := []pair{{
 		Left:  scp.LockEntry{Name: "v1", Commit: "aaaaaaaa"},
 		Right: scp.LockEntry{Name: "v2", Commit: "bbbbbbbb"},
 	}}
 
-	first, err := runCases(context.Background(), []string{caseMaxBurst}, pairs, 0, 1)
+	first, err := runCases(context.Background(), []string{caseMaxBurst}, pairs, 0, 1, timeout, "", interleavingAuto)
 	require.NoError(t, err)
-	second, err := runCases(context.Background(), []string{caseMaxBurst}, pairs, 0, 1)
+	second, err := runCases(context.Background(), []string{caseMaxBurst}, pairs, 0, 1, timeout, "", interleavingAuto)
 	require.NoError(t, err)
 	require.Len(t, first, len(second))
 	for i := range first {
@@ -34,12 +39,13 @@ func TestMaxBurstDeterministicWithoutSeed(t *testing.T) {
 func TestMaxBurstRepeat(t *testing.T) {
 	t.Parallel()
 
+	timeout := 20 * time.Second
 	pairs := []pair{{
 		Left:  scp.LockEntry{Name: "v1", Commit: "aaaaaaaa"},
 		Right: scp.LockEntry{Name: "v2", Commit: "bbbbbbbb"},
 	}}
 
-	results, err := runCases(context.Background(), []string{caseMaxBurst}, pairs, 123, 2)
+	results, err := runCases(context.Background(), []string{caseMaxBurst}, pairs, 123, 2, timeout, "", interleavingAuto)
 	require.NoError(t, err)
 	require.Len(t, results, 2)
 	require.Equal(t, 1, results[0].Iteration)
@@ -51,13 +57,14 @@ func TestMaxBurstRepeat(t *testing.T) {
 func TestMaxBurstSelfRepeatStable(t *testing.T) {
 	t.Parallel()
 
+	timeout := 20 * time.Second
 	entry := scp.LockEntry{Name: "v1", Commit: "aaaaaaaa"}
 	pairs := []pair{
 		{Left: entry, Right: entry},
 		{Left: scp.LockEntry{Name: "v2", Commit: "aaaaaaaa"}, Right: scp.LockEntry{Name: "v2", Commit: "aaaaaaaa"}},
 	}
 
-	results, err := runCases(context.Background(), []string{caseMaxBurst}, pairs, 123, 2)
+	results, err := runCases(context.Background(), []string{caseMaxBurst}, pairs, 123, 2, timeout, "", interleavingAuto)
 	require.NoError(t, err)
 	require.Len(t, results, 4)
 

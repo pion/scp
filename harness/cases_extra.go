@@ -1,12 +1,9 @@
 // SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
-package testcmd
+package harness
 
-import (
-	"context"
-	"time"
-)
+import "time"
 
 type networkProfile struct {
 	MinDelay    time.Duration
@@ -96,45 +93,12 @@ func rackBurstLossProfile() networkProfile {
 	}
 }
 
-func runHandshakeCase(ctx context.Context, pairs []pair, seed int64, repeat int) ([]scenarioResult, error) {
-	// handshake is effectively an unordered case with no data; we reuse unordered runner with a tiny payload count.
-	return runUnorderedCase(ctx, pairs, seed, repeat, networkProfile{Name: "handshake"})
-}
-
-func runUnorderedCase(ctx context.Context, pairs []pair, seed int64, repeat int, profile networkProfile) ([]scenarioResult, error) {
-	if len(pairs) == 0 {
-		return nil, errInsufficientEntries
+func mediaHEVCProfile() networkProfile {
+	return networkProfile{
+		MinDelay:    10 * time.Millisecond,
+		MaxJitter:   5 * time.Millisecond,
+		DropPercent: 3.0,
+		Unordered:   true,
+		Name:        "media-hevc",
 	}
-
-	var results []scenarioResult
-	for idx, p := range pairs {
-		for iter := range repeat {
-			seq := idx*repeat + iter
-			forward, reverse, metrics, err := runBurstTrafficProfile(ctx, p, seed, seq, profile)
-			res := scenarioResult{
-				CaseName:     profile.Name,
-				Pair:         p,
-				Iteration:    iter + 1,
-				ForwardBurst: forward,
-				ReverseBurst: reverse,
-				Metrics:      metrics,
-				Passed:       err == nil && forward >= minBurstPackets && reverse >= minBurstPackets,
-				Details:      formatMetrics(metrics),
-			}
-			if err != nil {
-				res.Details += " err=" + err.Error()
-			}
-			results = append(results, res)
-		}
-	}
-
-	return results, nil
-}
-
-func runCongestionCase(ctx context.Context, pairs []pair, seed int64, repeat int) ([]scenarioResult, error) {
-	return runUnorderedCase(ctx, pairs, seed, repeat, congestionProfile())
-}
-
-func runRetransmissionCase(ctx context.Context, pairs []pair, seed int64, repeat int) ([]scenarioResult, error) {
-	return runUnorderedCase(ctx, pairs, seed, repeat, lossProfile())
 }

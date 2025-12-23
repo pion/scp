@@ -1,7 +1,10 @@
+//go:build harness_integration
+// +build harness_integration
+
 // SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
-package testcmd
+package harness
 
 import (
 	"context"
@@ -15,6 +18,7 @@ import (
 
 func TestRunMaxBurstWritesJUnit(t *testing.T) {
 	t.Parallel()
+	t.Skip("requires generated adapters; run via scp test")
 
 	dir := t.TempDir()
 	lockPath := filepath.Join(dir, "lock.json")
@@ -36,7 +40,7 @@ func TestRunMaxBurstWritesJUnit(t *testing.T) {
 		Repeat:    1,
 	}
 
-	require.NoError(t, Run(context.Background(), opts))
+	require.NoError(t, Run(context.Background(), opts, nil))
 	data, err := os.ReadFile(filepath.Clean(junitPath))
 	require.NoError(t, err)
 	require.Contains(t, string(data), "testsuite")

@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	rootModulePath      = "generated"
+	rootModulePath      = "generated.local"
 	apiPackageName      = "api"
 	harnessPackageName  = "harness"
 	internalDepsDirName = "internaldeps"
@@ -45,6 +45,7 @@ type generationConfig struct {
 	Entries     []scp.LockEntry
 	FeatureSpec featureSpec
 	Repository  string
+	ProjectRoot string
 }
 
 func Run(ctx context.Context, opts Options) error {
@@ -101,6 +102,10 @@ func prepareConfig(opts Options) (generationConfig, error) {
 	if err != nil {
 		return generationConfig{}, fmt.Errorf("generate: resolve output dir: %w", err)
 	}
+	projectRoot, err := filepath.Abs(".")
+	if err != nil {
+		return generationConfig{}, fmt.Errorf("generate: resolve project root: %w", err)
+	}
 
 	repo := "https://github.com/pion/sctp"
 	if lock.Metadata.Repository != "" {
@@ -114,6 +119,7 @@ func prepareConfig(opts Options) (generationConfig, error) {
 		Entries:     entries,
 		FeatureSpec: features,
 		Repository:  repo,
+		ProjectRoot: projectRoot,
 	}, nil
 }
 
@@ -125,7 +131,7 @@ func executeGeneration(cfg generationConfig) error {
 		return fmt.Errorf("generate: create output dir: %w", err)
 	}
 
-	if err := writeRootModule(cfg.OutDir); err != nil {
+	if err := writeRootModule(cfg.OutDir, cfg.ProjectRoot); err != nil {
 		return err
 	}
 	if err := writeAPIPackage(cfg.OutDir, cfg.Header, cfg.APIName); err != nil {
@@ -194,9 +200,12 @@ func selectEntries(lock *scp.Lockfile, only []string) ([]scp.LockEntry, error) {
 	return selected, nil
 }
 
-func writeRootModule(outDir string) error {
+func writeRootModule(outDir, projectRoot string) error {
 	goModPath := filepath.Join(outDir, "go.mod")
-	content := "module " + rootModulePath + "\n\ngo 1.25\n\nrequire github.com/pion/transport v0.14.1\n"
+	content := "module " + rootModulePath + "\n\ngo 1.25\n\nrequire (\n" +
+		"    github.com/pion/scp v0.0.0\n" +
+		"    github.com/pion/transport v0.14.1\n" +
+		")\n\nreplace github.com/pion/scp => " + projectRoot + "\n"
 	data := []byte(content)
 
 	return os.WriteFile(goModPath, data, 0o600)
@@ -210,16 +219,18 @@ func writeAPIPackage(outDir, header, apiName string) error {
 
 	pkg := fmt.Sprintf(`%spackage %s
 
-// Adapter represents a minimal SCTP adapter implementation.
-type Adapter interface {
-	// Name returns a human readable adapter name.
-	Name() string
-}
+import harness "github.com/pion/scp/harness"
 
-// DialRequest contains placeholder dial parameters.
-type DialRequest struct {
-	Remote string
-}
+type Adapter = harness.Adapter
+type AdapterFactory = harness.AdapterFactory
+type Config = harness.Config
+type Association = harness.Association
+type Stream = harness.Stream
+
+const (
+	PayloadTypeWebRTCBinary = harness.PayloadTypeWebRTCBinary
+	ReliabilityTypeReliable = harness.ReliabilityTypeReliable
+)
 `, header, apiName)
 
 	return os.WriteFile(filepath.Join(apiDir, "sctp_api.go"), []byte(pkg), 0o600)
@@ -235,9 +246,8 @@ func stageInternalDependency(outDir string, repo string, entry scp.LockEntry) (d
 	if err := copyTree(sourcePath, depDir); err != nil {
 		return dependencyInfo{}, fmt.Errorf("generate: copy %s: %w", entry.Name, err)
 	}
-
 	modulePath := strings.Join([]string{rootModulePath, internalDepsDirName, entry.Name}, "/")
-	if err := rewriteModule(depDir, modulePath); err != nil {
+	if err := removeModuleFiles(depDir); err != nil {
 		return dependencyInfo{}, err
 	}
 	if err := rewriteImports(depDir, "github.com/pion/sctp", modulePath); err != nil {
@@ -257,12 +267,20 @@ func writeWrapper(outDir, header string, entry scp.LockEntry, dep dependencyInfo
 	content := fmt.Sprintf(`%spackage %s
 
 import (
+	"fmt"
+	"reflect"
+	"time"
+
 	adapter %q
 	api %q
 )
 
-// Adapter is a placeholder implementation for %s.
+// Adapter implements the harness adapter interface for %s.
 type Adapter struct{}
+
+type association struct {
+	assoc *adapter.Association
+}
 
 // New returns a new Adapter instance.
 func New() api.Adapter {
@@ -272,6 +290,181 @@ func New() api.Adapter {
 // Name returns the adapter identifier.
 func (a *Adapter) Name() string {
 	return %q
+}
+
+// SupportsInterleaving reports whether EnableInterleaving is supported in the SCTP config.
+func (a *Adapter) SupportsInterleaving() bool {
+	return supportsField("EnableInterleaving")
+}
+
+func supportsField(name string) bool {
+	t := reflect.TypeOf(adapter.Config{})
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	_, ok := t.FieldByName(name)
+	return ok
+}
+
+func applyOptionalConfig(cfg *adapter.Config, opts api.Config) error {
+	if opts.EnableInterleaving {
+		if err := setBoolField(cfg, "EnableInterleaving", true); err != nil {
+			return err
+		}
+	}
+	if opts.MaxMessageSize > 0 {
+		if err := setUintField(cfg, "MaxMessageSize", uint64(opts.MaxMessageSize)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func setBoolField(cfg *adapter.Config, name string, value bool) error {
+	v := reflect.ValueOf(cfg)
+	if v.Kind() != reflect.Pointer || v.IsNil() {
+		return fmt.Errorf("config %%s: invalid target", name)
+	}
+	elem := v.Elem()
+	field := elem.FieldByName(name)
+	if !field.IsValid() {
+		return fmt.Errorf("config missing %%s", name)
+	}
+	if !field.CanSet() {
+		return fmt.Errorf("config %%s not settable", name)
+	}
+	if field.Kind() != reflect.Bool {
+		return fmt.Errorf("config %%s not bool", name)
+	}
+	field.SetBool(value)
+	return nil
+}
+
+func setUintField(cfg *adapter.Config, name string, value uint64) error {
+	v := reflect.ValueOf(cfg)
+	if v.Kind() != reflect.Pointer || v.IsNil() {
+		return fmt.Errorf("config %%s: invalid target", name)
+	}
+	elem := v.Elem()
+	field := elem.FieldByName(name)
+	if !field.IsValid() {
+		return fmt.Errorf("config missing %%s", name)
+	}
+	if !field.CanSet() {
+		return fmt.Errorf("config %%s not settable", name)
+	}
+	switch field.Kind() {
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		field.SetUint(value)
+		return nil
+	default:
+		return fmt.Errorf("config %%s not unsigned integer", name)
+	}
+}
+
+// Client establishes a client-side association.
+func (a *Adapter) Client(cfg api.Config) (api.Association, error) {
+	config := adapter.Config{
+		NetConn:       cfg.NetConn,
+		LoggerFactory: cfg.LoggerFactory,
+	}
+	if err := applyOptionalConfig(&config, cfg); err != nil {
+		return nil, err
+	}
+	assoc, err := adapter.Client(config)
+	if err != nil {
+		return nil, err
+	}
+
+	return &association{assoc: assoc}, nil
+}
+
+// Server establishes a server-side association.
+func (a *Adapter) Server(cfg api.Config) (api.Association, error) {
+	config := adapter.Config{
+		NetConn:       cfg.NetConn,
+		LoggerFactory: cfg.LoggerFactory,
+	}
+	if err := applyOptionalConfig(&config, cfg); err != nil {
+		return nil, err
+	}
+	assoc, err := adapter.Server(config)
+	if err != nil {
+		return nil, err
+	}
+
+	return &association{assoc: assoc}, nil
+}
+
+// OpenStream opens a stream on the association.
+func (a *association) OpenStream(streamID uint16, payloadType uint32) (api.Stream, error) {
+	stream, err := a.assoc.OpenStream(streamID, adapter.PayloadProtocolIdentifier(payloadType))
+	if err != nil {
+		return nil, err
+	}
+
+	return &streamWrapper{stream: stream}, nil
+}
+
+// AcceptStream accepts an incoming stream.
+func (a *association) AcceptStream() (api.Stream, error) {
+	stream, err := a.assoc.AcceptStream()
+	if err != nil {
+		return nil, err
+	}
+
+	return &streamWrapper{stream: stream}, nil
+}
+
+// BytesSent returns bytes sent on the association.
+func (a *association) BytesSent() uint64 {
+	return a.assoc.BytesSent()
+}
+
+// BytesReceived returns bytes received on the association.
+func (a *association) BytesReceived() uint64 {
+	return a.assoc.BytesReceived()
+}
+
+// Close closes the association.
+func (a *association) Close() error {
+	return a.assoc.Close()
+}
+
+// streamWrapper adapts the SCTP stream to the harness interface.
+type streamWrapper struct {
+	stream *adapter.Stream
+}
+
+// Read reads from the stream.
+func (s *streamWrapper) Read(p []byte) (int, error) {
+	return s.stream.Read(p)
+}
+
+// Write writes to the stream.
+func (s *streamWrapper) Write(p []byte) (int, error) {
+	return s.stream.Write(p)
+}
+
+// SetReadDeadline sets the read deadline.
+func (s *streamWrapper) SetReadDeadline(deadline time.Time) error {
+	return s.stream.SetReadDeadline(deadline)
+}
+
+// SetWriteDeadline sets the write deadline.
+func (s *streamWrapper) SetWriteDeadline(deadline time.Time) error {
+	return s.stream.SetWriteDeadline(deadline)
+}
+
+// SetReliabilityParams sets reliability parameters.
+func (s *streamWrapper) SetReliabilityParams(unordered bool, relType byte, relVal uint32) {
+	s.stream.SetReliabilityParams(unordered, relType, relVal)
+}
+
+// Close closes the stream.
+func (s *streamWrapper) Close() error {
+	return s.stream.Close()
 }
 `, header, pkgName, dep.ImportPath, rootModulePath+"/"+apiPackageName, entry.Name, entry.Name)
 
@@ -323,7 +516,7 @@ func writeHarness(outDir, header string, wrappers []wrapperInfo, featureMatrix m
 	builder.WriteString("    api \"")
 	builder.WriteString(rootModulePath + "/" + apiPackageName)
 	builder.WriteString("\"\n)\n\n")
-	builder.WriteString("type AdapterFactory func() api.Adapter\n\n")
+	builder.WriteString("type AdapterFactory = api.AdapterFactory\n\n")
 	builder.WriteString("var Registry = map[string]AdapterFactory{\n")
 	builder.WriteString(strings.Join(registryEntries, "\n"))
 	if len(registryEntries) > 0 {
@@ -348,24 +541,59 @@ func writeHarnessCommand(outDir, header string) error {
 	mainFile := fmt.Sprintf(`%spackage main
 
 import (
+	"context"
+	"flag"
 	"fmt"
+	"os"
 
-	"github.com/pion/transport/vnet"
 	harness %q
+	registry %q
 )
 
 func main() {
-	router := vnet.NewRouter()
-	defer func() {
-		_ = router.Stop()
-	}()
+	opts := harness.DefaultOptions()
+	var include string
+	var exclude string
+	var explicit string
+	var cases string
 
-	fmt.Println("registered adapters:")
-	for name := range harness.Registry {
-		fmt.Printf(" - %%s\n", name)
+	flag.StringVar(&opts.LockPath, "lock", opts.LockPath, "path to lock.json")
+	flag.StringVar(&opts.PairMode, "pairs", opts.PairMode, "pair selection mode (adjacent|latest-prev|matrix|explicit|self)")
+	flag.StringVar(&include, "include", "", "include only these entries (comma-separated)")
+	flag.StringVar(&exclude, "exclude", "", "exclude these entries (comma-separated)")
+	flag.StringVar(&explicit, "explicit", "", "explicit pairs when --pairs=explicit (comma-separated A:B)")
+	flag.StringVar(&cases, "cases", "", "scenario IDs to run (comma-separated)")
+	flag.StringVar(&opts.Timeout, "timeout", opts.Timeout, "overall timeout for each pair")
+	flag.Int64Var(&opts.Seed, "seed", opts.Seed, "base seed (0=default)")
+	flag.StringVar(&opts.JUnitPath, "out", opts.JUnitPath, "path to write JUnit XML results")
+	flag.StringVar(&opts.OutDir, "out-dir", opts.OutDir, "directory to write run artifacts")
+	flag.StringVar(&opts.Interleaving, "interleaving", opts.Interleaving, "override interleaving mode (auto|on|off)")
+	flag.StringVar(&opts.PprofCPU, "pprof-cpu", opts.PprofCPU, "path to write CPU profile")
+	flag.StringVar(&opts.PprofHeap, "pprof-heap", opts.PprofHeap, "path to write heap profile")
+	flag.StringVar(&opts.PprofAllocs, "pprof-allocs", opts.PprofAllocs, "path to write allocs profile")
+	flag.IntVar(&opts.Repeat, "repeat", opts.Repeat, "number of times to run each pair (>=1)")
+
+	flag.Parse()
+
+	if include != "" {
+		opts.IncludeNames = []string{include}
+	}
+	if exclude != "" {
+		opts.ExcludeNames = []string{exclude}
+	}
+	if explicit != "" {
+		opts.ExplicitPairs = []string{explicit}
+	}
+	if cases != "" {
+		opts.Cases = []string{cases}
+	}
+
+	if err := harness.Run(context.Background(), opts, registry.Registry); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %%v\n", err)
+		os.Exit(1)
 	}
 }
-`, header, rootModulePath+"/"+harnessPackageName)
+`, header, "github.com/pion/scp/harness", rootModulePath+"/"+harnessPackageName)
 
 	return os.WriteFile(filepath.Join(cmdDir, "main.go"), []byte(mainFile), 0o600)
 }
@@ -461,6 +689,20 @@ func rewriteImports(dir, oldPath, newPath string) error {
 
 		return os.WriteFile(cleanPath, []byte(updated), 0o600)
 	})
+}
+
+func removeModuleFiles(dir string) error {
+	for _, name := range []string{"go.mod", "go.sum"} {
+		path := filepath.Join(dir, name)
+		if err := os.Remove(path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("generate: remove %s: %w", name, err)
+		}
+	}
+
+	return nil
 }
 
 func sanitizePackage(name string) string {
