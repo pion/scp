@@ -8,6 +8,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/pion/logging v0.2.4
 	github.com/pion/transport v0.14.1
+	github.com/pion/transport/v3 v3.1.1
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/mod v0.31.0
