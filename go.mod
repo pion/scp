@@ -2,7 +2,7 @@ module github.com/pion/scp
 
 go 1.24.0
 
-toolchain go1.26.1
+toolchain go1.26.2
 
 require (
 	github.com/Masterminds/semver/v3 v3.4.0
