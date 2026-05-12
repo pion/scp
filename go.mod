@@ -5,7 +5,7 @@ go 1.24.0
 toolchain go1.26.1
 
 require (
-	github.com/Masterminds/semver/v3 v3.4.0
+	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/pion/logging v0.2.4
 	github.com/pion/transport v0.14.1
 	github.com/spf13/cobra v1.10.2
