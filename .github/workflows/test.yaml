@@ -15,12 +15,12 @@ name: Test
 on:
   push:
     branches:
-      - master
+      - main
   pull_request:
 
 jobs:
   test:
-    uses: pion/.goassets/.github/workflows/test.reusable.yml@master
+    uses: pion/.goassets/.github/workflows/test.reusable.yml@main
     strategy:
       matrix:
         go: ["1.25", "1.24"] # auto-update/supported-go-version-list
