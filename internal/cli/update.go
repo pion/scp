@@ -13,6 +13,7 @@ func newUpdateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Update lock files from manifest entries with floating refs",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return update.Run(cmd.Context(), opts)
 		},

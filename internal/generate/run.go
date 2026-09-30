@@ -16,7 +16,6 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/pion/scp/internal/scp"
-	"golang.org/x/mod/modfile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -628,41 +627,6 @@ func copyTree(src, dst string) error {
 
 		return os.WriteFile(target, data, 0o600)
 	})
-}
-
-func rewriteModule(dir, modulePath string) error {
-	goModPath := filepath.Join(dir, "go.mod")
-	cleanPath := filepath.Clean(goModPath)
-	data, err := os.ReadFile(cleanPath)
-	if err != nil {
-		return fmt.Errorf("generate: read go.mod: %w", err)
-	}
-	file, err := modfile.Parse("go.mod", data, nil)
-	if err != nil {
-		return fmt.Errorf("generate: parse go.mod: %w", err)
-	}
-
-	if file.Module == nil {
-		if addErr := file.AddModuleStmt(modulePath); addErr != nil {
-			return fmt.Errorf("generate: set module path: %w", addErr)
-		}
-	} else {
-		file.Module.Mod.Path = modulePath
-	}
-	if file.Go == nil {
-		if addErr := file.AddGoStmt("1.21"); addErr != nil {
-			return fmt.Errorf("generate: set go version: %w", addErr)
-		}
-	} else {
-		file.Go.Version = "1.21"
-	}
-
-	newData, err := file.Format()
-	if err != nil {
-		return fmt.Errorf("generate: format go.mod: %w", err)
-	}
-
-	return os.WriteFile(cleanPath, newData, 0o600)
 }
 
 func rewriteImports(dir, oldPath, newPath string) error {

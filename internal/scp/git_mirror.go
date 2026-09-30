@@ -4,12 +4,10 @@
 package scp
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -49,7 +47,7 @@ func EnsureMirror(ctx context.Context, repoURL, cacheDir string) (*Mirror, error
 }
 
 func (m *Mirror) RevParse(ctx context.Context, rev string) (string, error) {
-	out, err := runGitStdout(ctx, m.Path, "rev-parse", rev)
+	out, err := gitCommand(ctx, m.Path, "rev-parse", rev)
 	if err != nil {
 		return "", err
 	}
@@ -65,7 +63,7 @@ func (m *Mirror) ForEachRef(ctx context.Context, pattern string, format string) 
 	if format != "" {
 		args = append(args, "--format="+format)
 	}
-	out, err := runGitStdout(ctx, m.Path, args...)
+	out, err := gitCommand(ctx, m.Path, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +79,7 @@ func (m *Mirror) ResolveBefore(ctx context.Context, revPattern string, before st
 	if before == "" {
 		return m.RevParse(ctx, revPattern)
 	}
-	out, err := runGitStdout(ctx, m.Path, "rev-list", "-n", "1", "--before="+before, revPattern)
+	out, err := gitCommand(ctx, m.Path, "rev-list", "-n", "1", "--before="+before, revPattern)
 	if err != nil {
 		return "", err
 	}
@@ -99,28 +97,9 @@ func mirrorDirName(repoURL string) string {
 }
 
 func runGit(ctx context.Context, dir string, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return gitCommandError(args, err, stderr.String())
-	}
+	_, err := gitCommandBytes(ctx, dir, args...)
 
-	return nil
-}
-
-func runGitStdout(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", gitCommandError(args, err, stderr.String())
-	}
-
-	return stdout.String(), nil
+	return err
 }
 
 var errGitCommand = errors.New("git command failed")

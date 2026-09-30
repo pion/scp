@@ -85,10 +85,16 @@ func writeProfile(path, name string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	if err := prof.WriteTo(file, 0); err != nil {
 		return fmt.Errorf("test: write %s profile: %w", name, err)
+	}
+
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("test: close %s profile: %w", name, err)
 	}
 
 	return nil

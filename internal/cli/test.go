@@ -13,6 +13,7 @@ func newTestCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "test",
 		Short: "Build runners and execute cross-revision scenarios",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return testcmd.Run(cmd.Context(), opts)
 		},

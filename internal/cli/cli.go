@@ -17,11 +17,7 @@ func Execute(args []string) error {
 	root.SetArgs(args)
 	ctx := context.Background()
 
-	if err := root.ExecuteContext(ctx); err != nil {
-		return err
-	}
-
-	return nil
+	return root.ExecuteContext(ctx)
 }
 
 func PrintError(err error) {
@@ -37,9 +33,6 @@ harnesses, and runs cross-version compatibility tests.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-
-	cmd.PersistentFlags().BoolP("verbose", "v", false, "enable verbose logging")
-	cmd.PersistentFlags().Bool("dry-run", false, "show actions without writing results")
 
 	cmd.AddCommand(newResolveCmd())
 	cmd.AddCommand(newUpdateCmd())

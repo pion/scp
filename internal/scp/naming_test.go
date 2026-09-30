@@ -57,7 +57,6 @@ func TestNameForSelector(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.desc, func(t *testing.T) {
 			got := NameForSelector(tc.raw, tc.typ, tc.value, tc.commit)
 			require.Equal(t, tc.want, got, "NameForSelector(%q, %v, %q, %q)",

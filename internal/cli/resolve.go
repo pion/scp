@@ -29,12 +29,7 @@ func newResolveCmd() *cobra.Command {
 
 			opts.Refs = scp.SplitAndTrim(opts.Refs)
 
-			ctx := cmd.Context()
-			if err := resolve.Run(ctx, opts); err != nil {
-				return err
-			}
-
-			return nil
+			return resolve.Run(cmd.Context(), opts)
 		},
 	}
 

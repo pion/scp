@@ -110,6 +110,10 @@ func CopyJSON(dst string, r io.Reader) error {
 		return fmt.Errorf("write %s: %w", safePath, err)
 	}
 
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", safePath, err)
+	}
+
 	return nil
 }
 
@@ -122,29 +126,25 @@ func makeParent(path string) error {
 	return os.MkdirAll(dir, 0o750)
 }
 
-func writeJSON(path string, v any) error {
-	tmp := path + ".tmp"
-	tmpFile, err := openWritableFile(tmp, 0o640)
+func writeJSON(path string, value any) (resultErr error) {
+	tmpFile, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temp: %w", err)
 	}
 
+	tmp := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close()
+		if removeErr := os.Remove(tmp); removeErr != nil && !os.IsNotExist(removeErr) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("remove temp file: %w", removeErr))
+		}
+	}()
+
 	enc := json.NewEncoder(tmpFile)
 	enc.SetIndent("", "  ")
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		closeErr := tmpFile.Close()
-		removeErr := os.Remove(tmp)
-
-		combined := fmt.Errorf("encode json: %w", err)
-		if closeErr != nil {
-			combined = errors.Join(combined, fmt.Errorf("close temp file: %w", closeErr))
-		}
-		if removeErr != nil {
-			combined = errors.Join(combined, fmt.Errorf("remove temp file: %w", removeErr))
-		}
-
-		return combined
+	if err := enc.Encode(value); err != nil {
+		return fmt.Errorf("encode json: %w", err)
 	}
 
 	if err := tmpFile.Close(); err != nil {
@@ -159,11 +159,11 @@ func writeJSON(path string, v any) error {
 }
 
 func cleanStatePath(path string) (string, error) {
-	cleaned := filepath.Clean(path)
-	if cleaned == "" {
+	if path == "" {
 		return "", errEmptyStatePath
 	}
 
+	cleaned := filepath.Clean(path)
 	if filepath.IsAbs(cleaned) {
 		return cleaned, nil
 	}

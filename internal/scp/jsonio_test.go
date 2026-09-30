@@ -29,11 +29,10 @@ func TestCleanStatePath(t *testing.T) {
 		{"Relative", "state/lock.json", filepath.Clean("state/lock.json"), nil},
 		{"Absolute", abs, abs, nil},
 		{"ParentTraversal", "../lock.json", "", errPathOutsideWorkspace},
-		{"Empty", "", ".", nil},
+		{"Empty", "", "", errEmptyStatePath},
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := cleanStatePath(tc.input)
@@ -117,4 +116,60 @@ func TestCopyJSON(t *testing.T) {
 	var parsed map[string]string
 	require.NoError(t, json.Unmarshal(content, &parsed))
 	require.Equal(t, "world", parsed["hello"])
+}
+
+func TestWriteJSONPreservesDestinationOnEncodeFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	original := []byte(`{"original":true}`)
+	require.NoError(t, os.WriteFile(path, original, 0o600))
+	require.Error(t, writeJSON(path, make(chan int)))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, original, data)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+}
+
+func TestWriteJSONCleansUpAfterRenameFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	require.NoError(t, os.Mkdir(path, 0o750))
+	require.Error(t, writeJSON(path, map[string]bool{"valid": true}))
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.True(t, entries[0].IsDir())
+}
+
+func TestWriteJSONConcurrent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	const writers = 16
+	errs := make(chan error, writers)
+	for i := range writers {
+		go func() {
+			errs <- writeJSON(path, map[string]int{"writer": i})
+		}()
+	}
+	for range writers {
+		require.NoError(t, <-errs)
+	}
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var result map[string]int
+	require.NoError(t, json.Unmarshal(data, &result))
+	require.Contains(t, result, "writer")
+	require.GreaterOrEqual(t, result["writer"], 0)
+	require.Less(t, result["writer"], writers)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
 }

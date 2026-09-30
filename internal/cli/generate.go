@@ -13,6 +13,7 @@ func newGenerateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "generate",
 		Short: "Generate runners, wrappers, and harness code from a lock file",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return generate.Run(cmd.Context(), opts)
 		},
